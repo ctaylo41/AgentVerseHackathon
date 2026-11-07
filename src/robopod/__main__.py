@@ -12,7 +12,7 @@ def main():
     parser.add_argument('--port', type=int, default=8765, help='Local app port')
     parser.add_argument('--refine', action='store_true', help='Enable teleprompter and scripted closed-loop responses')
     parser.add_argument('--max-adjustments', type=int, default=3, help='Subject-response budget per shot (0–6)')
-    parser.add_argument('--plan', type=Path, help='Validated shot_plan.json for execute mode')
+    parser.add_argument('--plan', type=Path, help='Validated shot_plan.json for execute/app modes')
     parser.add_argument('--preview', action='store_true', help='Show the executing camera; Q cancels')
     parser.add_argument('--brief', help='Creative brief for local Gemma planning')
     parser.add_argument('--scene-map', type=Path, help='Defaults to SURVEY/semantic_map/scene_map.json')
@@ -33,7 +33,7 @@ def main():
     args = parser.parse_args()
     if args.mode == 'app':
         from .app import run_app
-        run_app(args.port, args.output or Path('outputs/studio'))
+        run_app(args.port, args.output or Path('outputs/studio'), survey=args.survey, plan_path=args.plan)
         return
     if args.mode == 'execute':
         if args.plan is None or (args.scene_map is None and args.survey is None):

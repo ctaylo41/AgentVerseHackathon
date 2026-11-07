@@ -1,6 +1,6 @@
 # Robopod — local AI cinematographer
 
-Milestones 1–6 are implemented: a furnished MuJoCo studio, synthetic person and synthesizer,
+Milestones 1–7 are implemented: a furnished MuJoCo studio, synthetic person and synthesizer,
 actuated vertical rail plus pan/tilt/roll gimbal, native controls, and calibrated RGB,
 metric depth and geometry-ID segmentation captures, plus deterministic exploration
 and observed-surface coverage, fallback perception and sparse semantic mapping.
@@ -481,3 +481,33 @@ requests require the local session token and same-origin/Host checks. It has no 
 file-serving or external-network endpoint. Do not expose it through a public tunnel.
 All artifacts remain under `outputs/studio/` by default. Supported scripted actions and
 remaining geometric limitations are unchanged from Milestone 6.
+
+Milestone 7 automated verification: 33 tests pass, including workflow ordering, single-operation locking, local request checks, planner-worker publication and stale-result rejection.
+
+Browser verification: interrupted a survey with Restart, completed a fresh survey,
+loaded the labelled cooperative plan, and executed both shots to satisfied observed
+criteria with live camera/teleprompter updates and final comparisons. The Gemma worker
+path is covered by automated tests; this browser QA run used the cooperative plan.
+
+Brief-aware planning now rejects generic one-shot responses to explicit multi-shot
+requests. For a presenter/product → close-up → wider presenter brief, generation
+requires at least three shots and validation checks a product close-up followed by
+a presenter shot. Rule-of-thirds requests constrain horizontal placement, and target
+boxes must fit vertically in frame. These are conservative checks for explicit English
+phrases, not a complete natural-language intent parser. The UI shows the source brief
+and distinguishes the hand-authored demo from a Gemma response. Unsupported continuous
+in-shot movement/optical zoom is reported rather than promised as executable motion.
+
+Explicit multi-shot briefs are generated in smaller per-shot requests (each with its
+own required type and scene targets), then assembled and validated as a whole. The UI
+shows per-shot generation progress, plan title/version and its source brief. Generic
+one-shot outputs cannot replace an explicit three-shot sequence. Browser brief drafts
+are saved locally for subsequent reloads. You can reopen the app with an existing survey:
+`python -m robopod app --survey outputs/studio/YOUR-SURVEY-DIRECTORY`.
+
+Live verification of the brief-aware update: local Gemma produced three separately
+validated shots (presenter/product, synthesizer close-up, return to presenter), with
+thirds placement, using per-shot generation. The prior single-call three-shot attempt
+hit the output limit; per-shot requests succeeded. The test suite contains 37 passing
+tests. To restore a generated sequence on startup, add `--plan PATH/shot_plan.json`
+alongside `--survey`; the app displays its source brief and run identifier.

@@ -3,6 +3,7 @@ import copy
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import hashlib
 from pathlib import Path
 import queue
 import secrets
@@ -27,7 +28,7 @@ class AppState:
         self.cancel = threading.Event()
         self.images = {}
         self.data = dict(busy=False, phase='starting', status='Starting simulation…', error=None,
-                         survey_ready=False, plan=None, plan_source=None, exploration=0, coverage=0,
+                         survey_ready=False, plan=None, plan_source=None, plan_brief=None, plan_version=None, plan_notes=[], exploration=0, coverage=0,
                          objects=[], joints={}, teleprompter='Stand by. Prepare your scene.',
                          events=[], results=[], output=None, frame=0, map_frame=0)
 
@@ -113,7 +114,13 @@ class Studio:
         obs = sim.capture()
         detections = self.perception.detect(obs)
         self.frame_number += 1
-        self.live_map.update(detections, obs, f'live_{self.frame_number}')
+        if obs.simulation_time != self.live_map.last_time:
+            self.live_map.update(detections, obs, f'live_{self.frame_number}')
+            # The UI map is a rolling preview, not an unbounded recording.
+            while len(self.live_map.viewpoints) > 256:
+                del self.live_map.viewpoints[next(iter(self.live_map.viewpoints))]
+            for record in self.live_map.objects.values():
+                record['seen_from'] = record['seen_from'][-256:]
         ok, encoded = cv2.imencode('.jpg', annotate(obs, detections), [cv2.IMWRITE_JPEG_QUALITY, 85])
         if ok:
             self.state.image('camera.jpg', encoded.tobytes())
@@ -145,7 +152,7 @@ class Studio:
         self.survey = self.scene_path = self.plan_path = None
         with self.state.lock:
             self.state.images.clear()
-        self.state.update(busy=True, phase='restarting', survey_ready=False, plan=None, plan_source=None,
+        self.state.update(busy=True, phase='restarting', survey_ready=False, plan=None, plan_source=None, plan_brief=None, plan_version=None, plan_notes=[],
                           exploration=0, coverage=0, results=[], output=None, error=None,
                           objects=[], map_frame=0, teleprompter='Stand by. Explore the room to begin.')
         self.frame(self.sim)
@@ -195,12 +202,16 @@ class Studio:
                 raise ValueError('A previous Ollama request is still finishing. Please retry shortly.')
             output = self.new_path('plan')
             epoch, survey, scene_path = self.epoch, self.survey, self.scene_path
-            self.state.update(plan=None, plan_source=None)
+            self.state.update(plan=None, plan_source=None, plan_brief=brief, plan_notes=[], plan_version=None)
             self.plan_path = None
             self.progress('Gemma is planning locally. The first request may take a few minutes…')
             def work():
                 try:
-                    plan = generate_plan(survey, scene_path, brief, output)
+                    def planning_progress(message):
+                        if epoch != self.epoch or self.state.cancel.is_set():
+                            raise Cancelled('Superseded planning request')
+                        self.state.log(message)
+                    plan = generate_plan(survey, scene_path, brief, output, image_count=2, progress=planning_progress)
                     self.plan_results.put((epoch, output, plan, None))
                 except Exception as error:
                     self.plan_results.put((epoch, output, None, str(error)))
@@ -216,7 +227,7 @@ class Studio:
             self.plan_path.mkdir()
             self.plan_path = self.plan_path/'shot_plan.json'
             self.plan_path.write_text(json.dumps(plan, indent=2))
-            self.state.update(plan=plan, plan_source='Hand-authored cooperative demo (not Gemma)', output=str(self.plan_path.parent.resolve()))
+            self.state.update(plan=plan, plan_brief=None, plan_version=self.plan_path.parent.name, plan_notes=['Hand-authored demo: this sequence does not use your creative brief.'], plan_source='Hand-authored cooperative demo (not Gemma)', output=str(self.plan_path.parent.resolve()))
             self.progress('Cooperative demo loaded. Ready to execute.')
         elif action == 'execute':
             from .execution import execute_plan
@@ -253,7 +264,10 @@ class Studio:
             self.state.log('Planning failed. Check the error and retry.')
         else:
             self.plan_path = output/'shot_plan.json'
-            self.state.update(plan=plan, plan_source='Local Gemma 4 E2B • validated')
+            from .brief import requirements
+            brief = json.loads((output/'context.json').read_text()).get('creative_brief', '') if (output/'context.json').exists() else ''
+            notes = ['Continuous in-shot movement and optical zoom are not yet supported; execution transitions between compositions.'] if requirements(brief)['movement_requested'] else []
+            self.state.update(plan=plan, plan_source='Local Gemma 4 E2B • validated', plan_brief=brief, plan_version=output.name, plan_notes=notes)
             self.state.log(f"Validated {len(plan['shots'])} shots. Ready to execute.")
 
 
@@ -312,7 +326,7 @@ def make_handler(state):
     return Handler
 
 
-def run_app(port=8765, output=Path('outputs/studio')):
+def run_app(port=8765, output=Path('outputs/studio'), survey=None, plan_path=None):
     state = AppState()
     server = ThreadingHTTPServer(('127.0.0.1', port), make_handler(state))
     server.daemon_threads = True
@@ -321,6 +335,29 @@ def run_app(port=8765, output=Path('outputs/studio')):
     print(f'Robopod Studio: http://127.0.0.1:{server.server_port}', flush=True)
     try:
         studio.reset()
+        if survey is not None:
+            studio.survey = Path(survey)
+            studio.scene_path = studio.survey/'semantic_map/scene_map.json'
+            saved_scene = json.loads(studio.scene_path.read_text())
+            manifest = json.loads((studio.survey/'manifest.json').read_text())
+            state.update(survey_ready=True, exploration=1, coverage=manifest['covered_voxels'],
+                         status=f"Loaded survey: {len(saved_scene['objects'])} objects. Generate a new plan.",
+                         output=str(studio.survey.resolve()))
+        if plan_path is not None:
+            if studio.scene_path is None:
+                raise ValueError('Loading an app plan requires --survey')
+            from .planning import parse_plan
+            scene = json.loads(studio.scene_path.read_text())
+            studio.plan_path = Path(plan_path)
+            restored = parse_plan(studio.plan_path.read_text(), scene, list(scene['viewpoints']))
+            report_path = studio.plan_path.parent/'planning_report.json'
+            report = json.loads(report_path.read_text()) if report_path.exists() else {}
+            if report.get('scene_map_sha256') and report['scene_map_sha256'] != hashlib.sha256(studio.scene_path.read_bytes()).hexdigest():
+                raise ValueError('Loaded plan was generated from a different scene map')
+            source = 'Local Gemma 4 E2B • loaded' if report.get('model') == 'gemma4:e2b' and report.get('status') == 'validated' else 'Imported plan • schema validated'
+            state.update(plan=restored, plan_source=source, plan_version=studio.plan_path.parent.name,
+                         plan_brief=report.get('creative_brief'), plan_notes=report.get('capability_notes', []),
+                         status=f"Loaded {len(restored['shots'])} validated shots. Ready to execute.")
         while True:
             studio.poll_plans()
             try:

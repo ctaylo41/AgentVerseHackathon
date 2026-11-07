@@ -62,3 +62,22 @@ class AppTests(unittest.TestCase):
         handler.rfile=BytesIO(payload)
         handler.do_POST()
         self.assertEqual(result[-1][0],409)
+
+    def test_planning_worker_publishes_validated_plan(self):
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        from unittest.mock import patch
+        state=AppState()
+        with TemporaryDirectory() as tmp:
+            studio=Studio(state,tmp)
+            studio.survey=Path(tmp)/'survey'
+            studio.scene_path=Path(tmp)/'scene.json'
+            plan={'title':'Test plan','shots':[]}
+            with patch('robopod.gemma.generate_plan',return_value=plan):
+                studio.action('plan','Test brief')
+                studio.planner.join(timeout=2)
+                self.assertFalse(studio.planner.is_alive())
+                studio.poll_plans()
+            self.assertEqual(state.snapshot()['plan'],plan)
+            self.assertFalse(state.snapshot()['busy'])
+            self.assertEqual(studio.plan_path.name,'shot_plan.json')
