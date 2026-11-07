@@ -15,7 +15,7 @@ def requirements(brief):
                 starts_close=starts_close,
                 sequence_guidance=('close-up of product, then wider presenter shot' if starts_close else 'presenter and product, then product close-up, then wider presenter shot') if sequence else '',
                 rule_of_thirds=bool(re.search(r'rule of thirds|rule-of-thirds', text)),
-                movement_requested=bool(re.search(r'movement|motion|moition|pan|tilt|move the camera', text)))
+                movement_requested=bool(re.search(r'movement|motion|moition|pan|tilt|move (?:the )?camera|moving camera|sweep|track|dolly|orbit|crane', text)))
 
 
 def validate_brief(plan, brief, scene):

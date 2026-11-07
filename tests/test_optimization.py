@@ -3,9 +3,10 @@ import unittest
 
 import numpy as np
 
-from robopod.control import MotionError, check_limits, move_to
+from robopod.control import MotionError, check_limits, move_to, step_sweep
 from robopod.execution import sample_surface
-from robopod.optimization import evaluate, safe_limits
+from robopod.optimization import evaluate, geometry_catalog, optimize, plan_sweep, safe_limits
+from robopod.perception import SegmentationPerception
 from robopod.simulation import Simulation, Observation
 
 
@@ -63,3 +64,34 @@ class OptimizationTests(unittest.TestCase):
         np.testing.assert_array_equal(points.max(axis=0),sample.max(axis=0))
         with self.assertRaises(ValueError): sample_surface(np.array([[np.nan,0,0]]))
         with self.assertRaises(ValueError): sample_surface(np.empty((0,3)))
+
+    def test_no_dutch_angle_and_continuous_sweep(self):
+        with Simulation() as sim, Simulation() as probe:
+            obs = sim.capture()
+            perception = SegmentationPerception(geometry_catalog(sim))
+            detections = {d.identity.object_id: d for d in perception.detect(obs)}
+            surfaces = {k: sample_surface(d.points_world) for k, d in detections.items()}
+            scene = {
+                'objects': {'body:person': {'category': 'person', 'label': 'Presenter'},
+                            'body:product': {'category': 'instrument', 'label': 'Synthesizer'}},
+                'viewpoints': {'v0': {'joints': sim.configuration}}
+            }
+            s = dict(shot_id='s1', description='Rule of thirds medium shot with camera motion',
+                     duration_seconds=2.0, preferred_view_id='v0',
+                     targets=[dict(object_id='body:person', center_x=0.333, center_y=0.5, frame_height_fraction=0.6)],
+                     completion=dict(max_center_error=0.12, max_scale_error=0.12, min_visible_fraction=0.6,
+                                     headroom_fraction=0.2, headroom_tolerance=0.15, hold_seconds=0.5),
+                     background_object_ids=[], perspective='neutral')
+            search = optimize(sim, probe, s, scene, surfaces, shortlist=4)
+            self.assertAlmostEqual(search['target']['roll'], 0.0)
+            for candidate in search['rendered_candidates']:
+                self.assertAlmostEqual(candidate['target']['roll'], 0.0)
+            move_to(sim, search['target'])
+            sweep = plan_sweep(sim, s, scene, surfaces)
+            self.assertTrue(sweep['continuous'])
+            self.assertAlmostEqual(sweep['end']['roll'], 0.0)
+            trace = []
+            step_sweep(sim, sweep['start'], sweep['end'], 0.0, 2.0, 2.0, trace=trace)
+            self.assertGreater(len(trace), 10)
+            check_limits(sim)
+

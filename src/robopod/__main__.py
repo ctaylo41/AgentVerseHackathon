@@ -24,6 +24,8 @@ def main():
     parser.add_argument('--height', type=int, default=480)
     parser.add_argument('--fovy', type=float, default=45)
     parser.add_argument('--camera-height', type=float, default=1.4)
+    parser.add_argument('--truck', type=float, default=0)
+    parser.add_argument('--dolly', type=float, default=0)
     parser.add_argument('--pan', type=float, default=0)
     parser.add_argument('--tilt', type=float, default=0)
     parser.add_argument('--roll', type=float, default=0)
@@ -90,7 +92,8 @@ def main():
             if result['status'] != 'completed':
                 raise SystemExit(1)
             return
-        sim.command(height=args.camera_height, pan=args.pan, tilt=args.tilt, roll=args.roll)
+        sim.command(height=args.camera_height, truck=args.truck, dolly=args.dolly,
+                    pan=args.pan, tilt=args.tilt, roll=args.roll)
         sim.step(3)
         if args.mode == 'capture':
             sim.save(args.output)

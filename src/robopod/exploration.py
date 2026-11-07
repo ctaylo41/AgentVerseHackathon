@@ -18,11 +18,16 @@ def survey_poses(limits):
     values = {axis: [limits[axis][0] + f * (limits[axis][1] - limits[axis][0])
                      for f in fs] for axis, fs in fractions.items()}
     poses = []
-    for height in values['height']:
+    for h_idx, height in enumerate(values['height']):
         for tilt in values['tilt']:
             pans = values['pan'] if len(poses) % 2 == 0 else values['pan'][::-1]
-            for pan in pans:
-                poses.append(dict(height=height, pan=pan, tilt=tilt, roll=0.0))
+            for p_idx, pan in enumerate(pans):
+                pose = dict(height=height, pan=pan, tilt=tilt, roll=0.0)
+                if 'truck' in limits:
+                    pose['truck'] = (-0.2, 0.0, 0.2)[p_idx % 3]
+                if 'dolly' in limits:
+                    pose['dolly'] = (0.0, 0.2, 0.4)[h_idx % 3]
+                poses.append(pose)
     return poses
 
 

@@ -102,7 +102,9 @@ def evaluate(shot, scene, surfaces, obs, detections=None, registry=None):
     delta = float(obs.world_from_camera[2,3]-target_z)
     perspective_loss = {'neutral': 0.0, 'eye_level': abs(delta)*0.1,
                         'high_angle': max(0., -delta)*0.2, 'low_angle': max(0., delta)*0.2}[shot['perspective']]
-    return dict(loss=float(loss+perspective_loss), targets=metrics, backgrounds=backgrounds,
+    allow_dutch = 'dutch' in shot.get('description', '').lower()
+    roll_loss = 0.0 if allow_dutch else abs(float(obs.joints.get('roll', 0.0))) * 0.5
+    return dict(loss=float(loss+perspective_loss+roll_loss), targets=metrics, backgrounds=backgrounds,
                 satisfies_observed_criteria=not reasons, failures=reasons,
                 visibility_metric='fraction of reference surface samples; incomplete-geometry proxy')
 
@@ -126,13 +128,16 @@ def optimize(sim, probe, shot, scene, surfaces, *, shortlist=8, progress=None):
     limits = safe_limits(sim)
     axes = sim.axes
     current = {name: float(sim.data.ctrl[sim.model.actuator(name).id]) for name in axes}
+    allow_dutch = 'dutch' in shot.get('description', '').lower()
     scratch = mujoco.MjData(sim.model)
     scratch.mocap_pos[:] = sim.data.mocap_pos
     scratch.mocap_quat[:] = sim.data.mocap_quat
     ranked = {}
 
     def rank(target):
-        target = {name: float(np.clip(target[name], *limits[name])) for name in axes}
+        target = {name: float(np.clip(target.get(name, current.get(name, 0.0)), *limits[name])) for name in axes}
+        if not allow_dutch and 'roll' in target:
+            target['roll'] = 0.0
         key = tuple(round(target[name], 7) for name in axes)
         if key in ranked:
             return
@@ -152,13 +157,38 @@ def optimize(sim, probe, shot, scene, surfaces, *, shortlist=8, progress=None):
     rank(current)
     preferred = scene['viewpoints'][shot['preferred_view_id']]['joints']
     rank(preferred)
+    rolls = [-0.15, 0., 0.15] if allow_dutch else [0.0]
     for values in product(np.linspace(*limits['height'], 4), np.linspace(*limits['pan'], 7),
-                          np.linspace(*limits['tilt'], 7), [-0.15, 0., 0.15]):
-        rank(dict(zip(('height', 'pan', 'tilt', 'roll'), values)))
+                          np.linspace(*limits['tilt'], 7), rolls):
+        rank(dict(zip(('height', 'pan', 'tilt', 'roll'), values), truck=0.0, dolly=0.0))
+    if {'truck', 'dolly'} <= set(axes) and shot['targets']:
+        primary = shot['targets'][0]
+        pts = surfaces[primary['object_id']]
+        center = pts.mean(axis=0)
+        fovy_rad = math.radians(float(sim.model.cam_fovy[sim.camera_id]))
+        fovx_rad = 2 * math.atan(math.tan(fovy_rad / 2) * (sim.width / sim.height))
+        for truck in np.linspace(*limits['truck'], 5):
+            for dolly in np.linspace(*limits['dolly'], 5):
+                for height in np.linspace(*limits['height'], 4):
+                    dx = float(center[0] - truck)
+                    dy = float(center[1] - (-2.31 + dolly))
+                    dz = float(center[2] - height)
+                    dist_xy = max(1e-3, math.hypot(dx, dy))
+                    pan_look = math.atan2(-dx, dy) + (primary['center_x'] - 0.5) * fovx_rad
+                    tilt_look = math.atan2(dz, dist_xy) + (primary['center_y'] - 0.5) * fovy_rad
+                    rank(dict(height=height, truck=truck, dolly=dolly, pan=pan_look, tilt=tilt_look, roll=0.0))
     for step in (0.12, 0.04):
         best = min(ranked.values(), key=lambda item: item[0])[1]
-        for offsets in product([-step, 0, step], repeat=4):
-            rank({name: best[name]+offset for name, offset in zip(axes, offsets)})
+        for dh, dp, dt in product([-step, 0, step], repeat=3):
+            candidate = dict(best, height=best['height']+dh, pan=best['pan']+dp, tilt=best['tilt']+dt)
+            if not allow_dutch:
+                candidate['roll'] = 0.0
+            rank(candidate)
+        if {'truck', 'dolly'} <= set(axes):
+            best = min(ranked.values(), key=lambda item: item[0])[1]
+            for d_truck, d_dolly, dp, dt in product([-step*2, 0, step*2], [-step*2, 0, step*2], [-step, 0, step], [-step, 0, step]):
+                rank(dict(best, truck=best['truck']+d_truck, dolly=best['dolly']+d_dolly,
+                          pan=best['pan']+dp, tilt=best['tilt']+dt, roll=0.0))
     candidates = sorted(ranked.values(), key=lambda item: item[0])[:shortlist]
     probe.data.mocap_pos[:] = sim.data.mocap_pos
     probe.data.mocap_quat[:] = sim.data.mocap_quat
@@ -179,3 +209,90 @@ def optimize(sim, probe, shot, scene, surfaces, *, shortlist=8, progress=None):
             progress(f"{shot['shot_id']}: checked candidate {index+1}/{len(candidates)}")
     return dict(target=best_target, before=baseline, predicted_after=best_score,
                 geometric_candidates=len(ranked), rendered_candidates=checked)
+
+
+def plan_sweep(sim, shot, scene, surfaces):
+    """Select a smooth, framing-preserving continuous camera sweep across the shot duration."""
+    from .control import RATES
+    from .simulation import Observation
+    reference = sim.capture()
+    perception = SegmentationPerception(geometry_catalog(sim))
+    measured_start = evaluate(shot, scene, surfaces, reference, perception.detect(reference), perception.registry)
+    limits = safe_limits(sim)
+    axes = sim.axes
+    start = {name: float(sim.data.ctrl[sim.model.actuator(name).id]) for name in axes}
+    duration = float(shot.get('duration_seconds', 2.0))
+    max_delta = {n: RATES[n] * duration / 1.875 * 0.85 for n in axes}
+    scratch = mujoco.MjData(sim.model)
+    scratch.mocap_pos[:] = sim.data.mocap_pos
+    scratch.mocap_quat[:] = sim.data.mocap_quat
+    sag = {n: start[n] - sim.configuration[n] for n in axes}
+
+    def eval_pose(pose):
+        for name, value in pose.items():
+            scratch.joint(name).qpos[0] = value - sag[name]
+        mujoco.mj_forward(sim.model, scratch)
+        transform = np.eye(4)
+        transform[:3, :3] = scratch.cam_xmat[sim.camera_id].reshape(3, 3) @ np.diag([1, -1, -1])
+        transform[:3, 3] = scratch.cam_xpos[sim.camera_id]
+        obs = Observation(reference.rgb, reference.depth_m, reference.segmentation, reference.intrinsics,
+                          transform, float(scratch.time), pose)
+        return evaluate(shot, scene, surfaces, obs)
+
+    start_eval = eval_pose(start)
+    criteria = shot['completion']
+    tight_margin = any(
+        m['scale_error'] > 0.75 * criteria['max_scale_error'] or m['center_error'] > 0.75 * criteria['max_center_error']
+        for m in measured_start['targets'].values()
+    )
+    loss_budget = 0.005 if tight_margin else 0.05
+    best_end = dict(start)
+    best_score = -float('inf')
+
+    dh_vals = [-0.14, -0.08, 0.0, 0.08, 0.14]
+    dp_vals = [-0.05, -0.025, 0.0, 0.025, 0.05]
+    dt_vals = np.linspace(-0.06, 0.06, 9)
+
+    for dh, dp in product(dh_vals, dp_vals):
+        if abs(dh) < 1e-4 and abs(dp) < 1e-4:
+            continue
+        h_end = float(np.clip(start['height'] + np.clip(dh, -max_delta['height'], max_delta['height']), *limits['height']))
+        p_end = float(np.clip(start['pan'] + np.clip(dp, -max_delta['pan'], max_delta['pan']), *limits['pan']))
+        for dt in dt_vals:
+            t_end = float(np.clip(start['tilt'] + np.clip(dt, -max_delta['tilt'], max_delta['tilt']), *limits['tilt']))
+            end = dict(start, height=h_end, pan=p_end, tilt=t_end, roll=0.0)
+            if 'truck' in axes:
+                end['truck'] = float(np.clip(start['truck'] + np.clip(-dp * 1.2, -max_delta['truck'], max_delta['truck']), *limits['truck']))
+            if 'dolly' in axes:
+                d_step = max(0.0, dh * 0.3) if tight_margin else dh * 0.3
+                end['dolly'] = float(np.clip(start['dolly'] + np.clip(d_step, -max_delta['dolly'], max_delta['dolly']), *limits['dolly']))
+            disp = (abs(end['height'] - start['height'])
+                    + abs(end.get('truck', 0.0) - start.get('truck', 0.0))
+                    + abs(end.get('dolly', 0.0) - start.get('dolly', 0.0))
+                    + 0.6 * abs(end['pan'] - start['pan']) + 0.6 * abs(end['tilt'] - start['tilt']))
+            if disp < 0.02:
+                continue
+            valid = True
+            losses = []
+            for frac in (0.35, 0.7, 1.0):
+                wp = {n: start[n] + frac * (end[n] - start[n]) for n in axes}
+                res = eval_pose(wp)
+                if start_eval['satisfies_observed_criteria'] and not res['satisfies_observed_criteria']:
+                    valid = False
+                    break
+                if res['loss'] > start_eval['loss'] + loss_budget:
+                    valid = False
+                    break
+                losses.append(res['loss'])
+            if not valid:
+                continue
+            mean_drift = max(0.0, float(np.mean(losses)) - start_eval['loss'])
+            score = min(disp, 0.18) - 2.0 * mean_drift
+            if score > best_score:
+                best_score = score
+                best_end = end
+
+    displacement = {n: round(best_end[n] - start[n], 5) for n in axes}
+    return dict(start=start, end=best_end, displacement=displacement,
+                continuous=any(abs(v) > 1e-4 for v in displacement.values()))
+

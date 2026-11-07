@@ -1,7 +1,7 @@
 """Smooth bounded actuator trajectories; measured-state checks at physics rate."""
 import math
 
-RATES = {'height': 0.35, 'pan': 0.6, 'tilt': 0.5, 'roll': 0.35}
+RATES = {'height': 0.35, 'truck': 0.45, 'dolly': 0.45, 'pan': 0.6, 'tilt': 0.5, 'roll': 0.35}
 
 
 class MotionError(RuntimeError):
@@ -27,14 +27,16 @@ def advance(sim, seconds, trace=None):
 
 
 def move_to(sim, target, *, timeout=5.0, trace=None, callback=None):
-    if set(target) != set(sim.axes):
-        raise ValueError('Target must specify every rig axis')
+    core = {'height', 'pan', 'tilt', 'roll'}
+    if not (core <= set(target) <= set(sim.axes)):
+        raise ValueError('Target must specify all core rig axes and no unknown axes')
+    start = {name: float(sim.data.ctrl[sim.model.actuator(name).id]) for name in sim.axes}
+    target = {name: float(target[name]) if name in target else start[name] for name in sim.axes}
     for name, value in target.items():
         lo, hi = sim.limits[name]
         if not math.isfinite(value) or not lo <= value <= hi:
             raise ValueError(f'Invalid {name} target: {value}')
     check_limits(sim)
-    start = {name: float(sim.data.ctrl[sim.model.actuator(name).id]) for name in sim.axes}
     # Quintic smoothstep maximum derivative is 1.875; rates bound setpoint speed.
     duration = max(0.1, max(1.875*abs(target[n]-start[n])/RATES[n] for n in sim.axes))
     steps = math.ceil(duration/0.02)
@@ -55,3 +57,17 @@ def move_to(sim, target, *, timeout=5.0, trace=None, callback=None):
         if stable >= 0.2:
             return dict(settled=True, target=target, measured=sim.configuration)
     raise MotionError('Actuators did not settle within the allowed time')
+
+
+def step_sweep(sim, start, end, elapsed_before, dt, duration, trace=None):
+    """Advance continuous in-shot camera motion along a rate-limited quintic curve."""
+    if dt <= 0:
+        return
+    substeps = max(1, math.ceil(dt / 0.02))
+    sub_dt = dt / substeps
+    for i in range(1, substeps + 1):
+        t = min(1.0, max(0.0, (elapsed_before + i * sub_dt) / max(duration, 1e-6)))
+        blend = 10 * t**3 - 15 * t**4 + 6 * t**5
+        sim.command(**{n: start[n] + blend * (end[n] - start[n]) for n in sim.axes})
+        advance(sim, sub_dt, trace)
+

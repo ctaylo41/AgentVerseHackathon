@@ -143,7 +143,7 @@ def prepare_context(survey, scene_path, brief, image_count=3):
     context = dict(creative_brief=brief.strip(),
                    scene={key: {field: item[field] for field in fields} for key, item in scene['objects'].items()},
                    rig=dict(joint_limits=manifest['limits'], units='metres and radians',
-                            constraints='Vertical rail and pan/tilt/roll only. Fixed FOV. No dolly, orbit, horizontal translation or motor commands.'),
+                            constraints='6-DoF robotic camera arm (height, truck, dolly, pan, tilt, roll). Fixed FOV. Do not emit raw motor commands.'),
                    allowed_person_ids=sorted(key for key, item in scene['objects'].items() if item['category'] == 'person'),
                    representative_views=selected,
                    geometry_caveat='Positions and bounds are partial observed surfaces, not full geometry. Visibility refers to last observation; images show different times.')
@@ -159,7 +159,7 @@ For show presenter/product → close-up controls → return to presenter, produc
 For rule of thirds, put each primary target center_x at 0.333 or 0.667.
 Image center_y is measured from the TOP; 1.0 is the bottom edge, not standing upright.
 Keep each target bounding box inside the frame. Do not reuse generic framing for every shot.
-Continuous camera motion within shots and optical zoom are not implemented; state this limitation honestly. Targets use normalized image coordinates
+Continuous in-shot camera motion (smooth pedestal/pan/tilt tracking sweeps) is supported; optical zoom is not implemented—state zoom limitations honestly. Targets use normalized image coordinates
 (x right, y down). frame_height_fraction is each target's desired projected bounding-box height / image height.
 Completion center/scale errors are normalized absolute errors for every target; min_visible_fraction is the
 required fraction of each target's projected area that is visible. Headroom is space above a person's head
@@ -189,15 +189,15 @@ def generate_plan(survey, scene_path, brief, output, *, client=None, image_count
     schema['properties']['shots']['minItems'] = intent['minimum_shots']
     if intent['rule_of_thirds']:
         target_schema = schema['properties']['shots']['items']['properties']['targets']['items']['properties']
-        target_schema['center_x']['enum'] = [0.333333, 0.666667]
+        target_schema['center_x']['enum'] = [0.333333, 0.5, 0.666667]
     target_schema = schema['properties']['shots']['items']['properties']['targets']['items']['properties']
     target_schema['center_y'].update(minimum=0.35, maximum=0.65)
     target_schema['frame_height_fraction']['maximum'] = 0.7
     context['explicit_brief_requirements'] = intent
-    context['execution_capabilities'] = 'Moves between shot compositions, then holds. Continuous in-shot motion and optical zoom are not implemented. Do not promise them.'
+    context['execution_capabilities'] = 'Moves between shot compositions and executes continuous in-shot camera sweeps while holding framing. Optical zoom is not implemented; do not promise optical zoom.'
     report['creative_brief'] = brief
     report['brief_requirements'] = intent
-    report['capability_notes'] = (['Requested continuous motion is not executed yet; the rig transitions between static shot compositions.'] if intent['movement_requested'] else [])
+    report['capability_notes'] = (['Continuous in-shot camera sweep enabled; optical zoom is not supported on the fixed-FOV lens.'] if intent['movement_requested'] else [])
     _write_json(output/'context.json', context)
     _write_json(output/'shot_plan.schema.json', schema)
     messages = [dict(role='system', content=SYSTEM_PROMPT),
@@ -235,7 +235,8 @@ def generate_plan(survey, scene_path, brief, output, *, client=None, image_count
                          f'Return exactly ONE shot with shot_id shot_{stage_index+1}. The application assembles the sequence. '
                          'Overall minimum_shots is NOT the count for this individual response. '
                          f'Required target IDs: {required_targets}. Keep every string concise. '
-                         'Use human_instructions=[] unless a supported scripted physical movement is needed.')
+                         'When rule_of_thirds is active, place targets[0].center_x at 0.333333 or 0.666667 (and any second target on the opposite third 0.666667 or 0.333333). '
+                         'Use human_instructions=[] unless a supported scripted physical movement (e.g. "Step slightly to your left.") is needed.')
                 stage_messages[0]['content'] += '\n' + scope
                 stage_messages.append(dict(role='user', content=scope))
             _write_json(output/f'request_{stage_index+1}.schema.json', stage_schema)

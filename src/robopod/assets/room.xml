@@ -43,17 +43,25 @@
     <geom name="rail" type="box" pos="0 -2.5 1.25" size="0.035 0.035 1.2"/>
     <body name="carriage" pos="0 -2.4 0">
       <joint name="height" type="slide" axis="0 0 1" range="0.55 2.2"/>
-      <geom type="box" size="0.1 0.06 0.06" mass="1" contype="0" conaffinity="0"/>
-      <body name="pan_frame">
-        <joint name="pan" axis="0 0 1" range="-1.05 1.05"/>
-        <geom type="sphere" size="0.05" mass="0.2" contype="0" conaffinity="0"/>
-        <body name="tilt_frame">
-          <joint name="tilt" axis="1 0 0" range="-0.7 0.7"/>
-          <geom type="sphere" size="0.04" mass="0.2" contype="0" conaffinity="0"/>
-          <body name="camera_head">
-            <joint name="roll" axis="0 1 0" range="-0.35 0.35"/>
-            <geom type="box" size="0.07 0.06 0.04" mass="0.2" contype="0" conaffinity="0"/>
-            <camera name="rig" pos="0 0.09 0" xyaxes="1 0 0 0 0 1" fovy="45"/>
+      <geom type="box" size="0.1 0.06 0.06" mass="0.7" contype="0" conaffinity="0"/>
+      <body name="shoulder_boom">
+        <joint name="truck" type="slide" axis="1 0 0" range="-1.2 1.2"/>
+        <geom type="box" size="0.12 0.04 0.04" mass="0.15" contype="0" conaffinity="0"/>
+        <body name="forearm_boom">
+          <joint name="dolly" type="slide" axis="0 1 0" range="-0.4 1.4"/>
+          <geom type="box" size="0.04 0.12 0.04" mass="0.15" contype="0" conaffinity="0"/>
+          <body name="pan_frame">
+            <joint name="pan" axis="0 0 1" range="-1.05 1.05"/>
+            <geom type="sphere" size="0.05" mass="0.2" contype="0" conaffinity="0"/>
+            <body name="tilt_frame">
+              <joint name="tilt" axis="1 0 0" range="-0.7 0.7"/>
+              <geom type="sphere" size="0.04" mass="0.2" contype="0" conaffinity="0"/>
+              <body name="camera_head">
+                <joint name="roll" axis="0 1 0" range="-0.35 0.35"/>
+                <geom type="box" size="0.07 0.06 0.04" mass="0.2" contype="0" conaffinity="0"/>
+                <camera name="rig" pos="0 0.09 0" xyaxes="1 0 0 0 0 1" fovy="45"/>
+              </body>
+            </body>
           </body>
         </body>
       </body>
@@ -61,9 +69,11 @@
   </worldbody>
   <actuator>
     <position name="height" joint="height" kp="500" kv="60" ctrlrange="0.55 2.2"/>
+    <position name="truck" joint="truck" kp="300" kv="45" ctrlrange="-1.2 1.2"/>
+    <position name="dolly" joint="dolly" kp="300" kv="45" ctrlrange="-0.4 1.4"/>
     <position name="pan" joint="pan" kp="80" kv="12" ctrlrange="-1.05 1.05"/>
     <position name="tilt" joint="tilt" kp="80" kv="12" ctrlrange="-0.7 0.7"/>
     <position name="roll" joint="roll" kp="60" kv="10" ctrlrange="-0.35 0.35"/>
   </actuator>
-  <keyframe><key name="home" qpos="1.4 0 0 0" ctrl="1.4 0 0 0"/></keyframe>
+  <keyframe><key name="home" qpos="1.4 0 0 0 0 0" ctrl="1.4 0 0 0 0 0"/></keyframe>
 </mujoco>

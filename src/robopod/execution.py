@@ -6,9 +6,9 @@ import json
 import cv2
 import numpy as np
 
-from .control import advance, move_to
+from .control import advance, move_to, step_sweep
 from .exploration import _write_json
-from .optimization import evaluate, geometry_catalog, optimize
+from .optimization import evaluate, geometry_catalog, optimize, plan_sweep
 from .perception import SegmentationPerception
 from .planning import parse_plan
 from .simulation import Simulation
@@ -42,8 +42,8 @@ def execute_plan(sim, plan_path, scene_path, output, *, progress=print, preview=
     perception = SegmentationPerception(geometry_catalog(sim))
     if not needed <= {identity.object_id for identity in perception.registry.values()}:
         raise ValueError('Plan references objects not configured in this simulator')
-    if set(sim.axes) != {'height', 'pan', 'tilt', 'roll'}:
-        raise ValueError('This search currently supports the four-axis rail rig')
+    if not {'height', 'pan', 'tilt', 'roll'} <= set(sim.axes):
+        raise ValueError('Rig must provide at least height, pan, tilt and roll axes')
     output.mkdir(parents=True, exist_ok=False)
     _write_json(output/'validated_plan.json', plan)
     report = dict(status='running', shots=[],
@@ -93,21 +93,24 @@ def execute_plan(sim, plan_path, scene_path, output, *, progress=print, preview=
                                              show=show, trace=trace)
                     report['human_instructions_executed'] |= bool(refinement['rounds'])
                     show(sim)
-                after = sim.save(folder/'after')
-                measured = evaluate(shot, scene, surfaces, after, perception.detect(after), perception.registry)
+                sweep = plan_sweep(sim, shot, scene, surfaces)
+                motion['continuous_sweep'] = sweep
                 stable, max_stable = 0.0, 0.0
                 measurements = []
-                # Duration is simulated time. Sample framing at 10 Hz throughout the shot.
+                # Duration is simulated time. Execute continuous camera sweep and sample framing at 10 Hz.
                 start = float(sim.data.time)
                 while sim.data.time-start < shot['duration_seconds'] - 1e-8:
                     previous_time = float(sim.data.time)
-                    advance(sim, min(0.1, shot['duration_seconds']-(sim.data.time-start)), trace)
+                    dt = min(0.1, shot['duration_seconds']-(sim.data.time-start))
+                    step_sweep(sim, sweep['start'], sweep['end'], previous_time - start, dt, shot['duration_seconds'], trace)
                     obs = sim.capture()
                     result = evaluate(shot, scene, surfaces, obs, perception.detect(obs), perception.registry)
                     stable = stable + float(sim.data.time)-previous_time if result['satisfies_observed_criteria'] else 0.0
                     max_stable = max(max_stable, stable)
-                    measurements.append(dict(time=float(sim.data.time), metrics=result))
+                    measurements.append(dict(time=float(sim.data.time), joints=obs.joints, metrics=result))
                     show(sim)
+                after = sim.save(folder/'after')
+                measured = evaluate(shot, scene, surfaces, after, perception.detect(after), perception.registry)
                 completed = max_stable + 1e-8 >= shot['completion']['hold_seconds']
                 if refinement and refinement['pending_creative']:
                     completed = False
@@ -115,11 +118,17 @@ def execute_plan(sim, plan_path, scene_path, output, *, progress=print, preview=
                 advice = []
                 if not completed:
                     for key, metric in measured['targets'].items():
+                        actual = metric['framing']
+                        t_spec = next(t for t in shot['targets'] if t['object_id'] == key)
+                        label = scene['objects'][key]['label']
                         if metric['scale_error'] > shot['completion']['max_scale_error']:
-                            actual = metric['framing']
-                            wanted = next(t['frame_height_fraction'] for t in shot['targets'] if t['object_id'] == key)
-                            direction = 'closer to' if actual is None or actual['frame_height_fraction'] < wanted else 'farther from'
-                            advice.append(f'Move {scene["objects"][key]["label"]} {direction} the camera, then reobserve; fixed rail/FOV cannot provide arbitrary shot scale.')
+                            direction = 'closer to' if actual is None or actual['frame_height_fraction'] < t_spec['frame_height_fraction'] else 'farther from'
+                            advice.append(f'Move {label} {direction} the camera, then reobserve.')
+                        if metric['center_error'] > shot['completion']['max_center_error'] and actual is not None:
+                            side = 'left' if actual['center_x'] < t_spec['center_x'] else 'right'
+                            advice.append(f'Shift {label} laterally ({side} in frame) toward ({t_spec["center_x"]:.2f}, {t_spec["center_y"]:.2f}), then reobserve.')
+                        if metric['visible_surface_fraction'] < shot['completion']['min_visible_fraction']:
+                            advice.append(f'Clear occlusion on {label} by separating foreground/background subjects.')
                     if not advice:
                         advice.append('Reposition the subject/product or relax the composition requirements, then reobserve.')
                 item = dict(shot_id=shot['shot_id'], status=status, search=search, motion=motion,

@@ -151,6 +151,15 @@ class PerceptionPipeline:
 
 def annotate(obs, detections):
     image = cv2.cvtColor(obs.rgb, cv2.COLOR_RGB2BGR)
+    h, w = image.shape[:2]
+    grid_color = (90, 95, 100)
+    for frac in (1/3, 2/3):
+        gx, gy = round(w * frac), round(h * frac)
+        cv2.line(image, (gx, 0), (gx, h - 1), grid_color, 1, cv2.LINE_AA)
+        cv2.line(image, (0, gy), (w - 1, gy), grid_color, 1, cv2.LINE_AA)
+    for fx in (1/3, 2/3):
+        for fy in (1/3, 2/3):
+            cv2.circle(image, (round(w * fx), round(h * fy)), 4, (120, 185, 230), 1, cv2.LINE_AA)
     for detection in detections:
         if detection.identity.category in ('wall', 'floor'):
             continue

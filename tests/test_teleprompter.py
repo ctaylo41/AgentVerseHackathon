@@ -2,7 +2,7 @@ import unittest
 import numpy as np
 
 from robopod.simulation import Simulation
-from robopod.teleprompter import Instruction, Teleprompter, creative_action, observe_response, respond
+from robopod.teleprompter import Instruction, Teleprompter, correction, creative_action, observe_response, respond
 from robopod.perception import Detection, SemanticIdentity
 
 
@@ -48,7 +48,28 @@ class TeleprompterTests(unittest.TestCase):
     def test_creative_vocabulary_is_explicit(self):
         self.assertIsNotNone(creative_action('body:person','Step slightly to your left.'))
         self.assertEqual(creative_action('body:person','Move the product higher.').object_id,'body:product')
+        self.assertEqual(creative_action('body:person','Bring the product closer.').object_id,'body:product')
         self.assertIsNone(creative_action('body:person','Smile and point to the controls.'))
+
+    def test_lateral_vertical_and_occlusion_corrections(self):
+        scene = {'objects': {'body:person': {'category': 'person', 'label': 'Presenter'},
+                             'body:product': {'category': 'instrument', 'label': 'Synthesizer'}}}
+        shot = {'targets': [{'object_id': 'body:person', 'center_x': 0.333, 'center_y': 0.5, 'frame_height_fraction': 0.6}],
+                'completion': {'max_center_error': 0.08, 'max_scale_error': 0.1, 'min_visible_fraction': 0.7}}
+        measured_lat = {'targets': {'body:person': {'scale_error': 0.02, 'center_error': 0.17,
+                                                    'visible_surface_fraction': 0.9,
+                                                    'framing': {'center_x': 0.5, 'center_y': 0.5, 'frame_height_fraction': 0.6}}}}
+        inst_lat = correction(shot, measured_lat, scene)
+        self.assertIsNotNone(inst_lat)
+        self.assertEqual(inst_lat.axis, 0)
+        self.assertLess(inst_lat.displacement, 0)
+
+        measured_occ = {'targets': {'body:person': {'scale_error': 0.02, 'center_error': 0.02,
+                                                    'visible_surface_fraction': 0.4,
+                                                    'framing': {'center_x': 0.333, 'center_y': 0.5, 'frame_height_fraction': 0.6}}}}
+        inst_occ = correction(shot, measured_occ, scene)
+        self.assertIsNotNone(inst_occ)
+        self.assertEqual(inst_occ.axis, 0)
 
     def test_refinement_stops_when_script_is_not_observed(self):
         import tempfile

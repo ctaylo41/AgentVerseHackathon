@@ -266,7 +266,7 @@ class Studio:
             self.plan_path = output/'shot_plan.json'
             from .brief import requirements
             brief = json.loads((output/'context.json').read_text()).get('creative_brief', '') if (output/'context.json').exists() else ''
-            notes = ['Continuous in-shot movement and optical zoom are not yet supported; execution transitions between compositions.'] if requirements(brief)['movement_requested'] else []
+            notes = ['Continuous in-shot camera sweep enabled; optical zoom is not supported on the fixed-FOV lens.'] if requirements(brief)['movement_requested'] else []
             self.state.update(plan=plan, plan_source='Local Gemma 4 E2B • validated', plan_brief=brief, plan_version=output.name, plan_notes=notes)
             self.state.log(f"Validated {len(plan['shots'])} shots. Ready to execute.")
 
