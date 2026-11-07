@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "robopod"
+version = "0.1.0"
+description = "Local MuJoCo cinematographer prototype"
+requires-python = ">=3.11,<3.12"
+dependencies = ["mujoco==3.3.7", "numpy==2.2.6", "opencv-python==4.12.0.88"]
+
+[tool.setuptools.package-data]
+robopod = ["assets/*.xml"]

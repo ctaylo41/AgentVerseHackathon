@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "title": "Hand-authored cooperative cinematographer demo",
+  "shots": [
+    {
+      "perspective": "neutral",
+      "background_object_ids": [],
+      "preferred_view_id": "view_007",
+      "human_instructions": [
+        {
+          "subject_id": "body:person",
+          "instruction": "Step slightly to your left."
+        }
+      ],
+      "completion": {
+        "max_center_error": 0.1,
+        "max_scale_error": 0.08,
+        "min_visible_fraction": 0.6,
+        "headroom_fraction": 0.2,
+        "headroom_tolerance": 0.12,
+        "hold_seconds": 0.5
+      },
+      "shot_id": "presenter_medium",
+      "shot_type": "medium",
+      "description": "Centre the presenter with the synthesizer below.",
+      "duration_seconds": 2,
+      "targets": [
+        {
+          "object_id": "body:person",
+          "center_x": 0.5,
+          "center_y": 0.5,
+          "frame_height_fraction": 0.6
+        },
+        {
+          "object_id": "body:product",
+          "center_x": 0.5,
+          "center_y": 0.56,
+          "frame_height_fraction": 0.08
+        }
+      ],
+      "feasibility_notes": "Hand-authored regression example, not Gemma output."
+    },
+    {
+      "perspective": "neutral",
+      "background_object_ids": [],
+      "preferred_view_id": "view_007",
+      "human_instructions": [],
+      "completion": {
+        "max_center_error": 0.1,
+        "max_scale_error": 0.05,
+        "min_visible_fraction": 0.6,
+        "headroom_fraction": 0.2,
+        "headroom_tolerance": 0.12,
+        "hold_seconds": 0.5
+      },
+      "shot_id": "product_close_up",
+      "shot_type": "close_up",
+      "description": "Bring the synthesizer closer, then refine camera composition.",
+      "duration_seconds": 1,
+      "targets": [
+        {
+          "object_id": "body:product",
+          "center_x": 0.5,
+          "center_y": 0.5,
+          "frame_height_fraction": 0.32
+        }
+      ],
+      "feasibility_notes": "Requires a scripted presenter/product response; no physical grasp is simulated."
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+# Tested Python 3.11 / macOS arm64 environment; install project separately with pip install -e .
+PyOpenGL==3.1.10
+absl-py==2.5.1
+etils==1.15.0
+fsspec==2026.9.0
+glfw==2.11.0
+mujoco==3.3.7
+numpy==2.2.6
+opencv-python==4.12.0.88
+typing_extensions==4.16.0
+zipp==4.1.2

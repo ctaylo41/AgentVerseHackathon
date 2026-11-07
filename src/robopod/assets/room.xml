@@ -1,0 +1,69 @@
+<mujoco model="robopod studio">
+  <compiler angle="radian"/>
+  <option timestep="0.002" integrator="implicitfast"/>
+  <visual><global offwidth="1920" offheight="1080"/><map znear="0.01" zfar="30"/></visual>
+  <default>
+    <geom friction="0.8 0.1 0.1" rgba="0.5 0.5 0.5 1"/>
+    <joint damping="3" armature="0.02" limited="true"/>
+  </default>
+  <asset>
+    <texture name="floor" type="2d" builtin="checker" rgb1="0.16 0.19 0.22" rgb2="0.22 0.25 0.28" width="256" height="256"/>
+    <material name="floor" texture="floor" texrepeat="5 5"/>
+  </asset>
+  <worldbody>
+    <light pos="0 -1 5" dir="0 0 -1" diffuse="0.9 0.85 0.8"/>
+    <light pos="-3 1 3" dir="1 0 -1" diffuse="0.4 0.5 0.7"/>
+    <geom name="floor" type="plane" size="4 4 0.1" material="floor"/>
+    <geom name="back_wall" type="box" pos="0 3 1.5" size="4 0.08 1.5" rgba="0.24 0.3 0.36 1"/>
+    <geom name="side_wall" type="box" pos="-4 0 1.5" size="0.08 3 1.5" rgba="0.35 0.38 0.42 1"/>
+    <body name="desk" pos="0 0.8 0">
+      <geom name="desktop" type="box" pos="0 0 0.76" size="0.95 0.4 0.05" rgba="0.5 0.29 0.14 1"/>
+      <geom name="desk_leg_left" type="box" pos="-0.8 0 0.35" size="0.04 0.3 0.35"/>
+      <geom name="desk_leg_right" type="box" pos="0.8 0 0.35" size="0.04 0.3 0.35"/>
+    </body>
+    <body name="product" mocap="true" pos="0 0.65 0.86">
+      <geom name="synthesizer" type="box" size="0.42 0.2 0.05" rgba="0.07 0.09 0.12 1"/>
+      <geom name="keys" type="box" pos="0 -0.08 0.055" size="0.36 0.08 0.01" rgba="0.9 0.9 0.85 1"/>
+      <geom name="controls" type="box" pos="0 0.1 0.06" size="0.3 0.035 0.015" rgba="0.15 0.6 0.7 1"/>
+    </body>
+    <body name="person" mocap="true" pos="0 1.45 0">
+      <geom name="torso" type="capsule" fromto="0 0 0.95 0 0 1.4" size="0.19" rgba="0.16 0.45 0.6 1"/>
+      <geom name="head" type="sphere" pos="0 0 1.7" size="0.14" rgba="0.72 0.48 0.33 1"/>
+      <geom name="nose" type="sphere" pos="0 -0.135 1.7" size="0.035" rgba="0.72 0.48 0.33 1"/>
+      <geom name="left_arm" type="capsule" fromto="-0.2 0 1.4 -0.45 -0.2 0.96" size="0.065" rgba="0.16 0.45 0.6 1"/>
+      <geom name="right_arm" type="capsule" fromto="0.2 0 1.4 0.45 -0.2 0.96" size="0.065" rgba="0.16 0.45 0.6 1"/>
+      <geom name="left_leg" type="capsule" fromto="-0.12 0 0.9 -0.12 0 0.12" size="0.085" rgba="0.12 0.14 0.2 1"/>
+      <geom name="right_leg" type="capsule" fromto="0.12 0 0.9 0.12 0 0.12" size="0.085" rgba="0.12 0.14 0.2 1"/>
+    </body>
+    <body name="plant" pos="1.8 2.2 0">
+      <geom name="pot" type="cylinder" pos="0 0 0.2" size="0.22 0.2" rgba="0.65 0.3 0.15 1"/>
+      <geom name="foliage" type="ellipsoid" pos="0 0 0.9" size="0.38 0.3 0.65" rgba="0.16 0.4 0.2 1"/>
+    </body>
+    <geom name="art" type="box" pos="-1.5 2.9 1.7" size="0.5 0.025 0.6" rgba="0.8 0.42 0.15 1"/>
+    <geom name="rail" type="box" pos="0 -2.5 1.25" size="0.035 0.035 1.2"/>
+    <body name="carriage" pos="0 -2.4 0">
+      <joint name="height" type="slide" axis="0 0 1" range="0.55 2.2"/>
+      <geom type="box" size="0.1 0.06 0.06" mass="1" contype="0" conaffinity="0"/>
+      <body name="pan_frame">
+        <joint name="pan" axis="0 0 1" range="-1.05 1.05"/>
+        <geom type="sphere" size="0.05" mass="0.2" contype="0" conaffinity="0"/>
+        <body name="tilt_frame">
+          <joint name="tilt" axis="1 0 0" range="-0.7 0.7"/>
+          <geom type="sphere" size="0.04" mass="0.2" contype="0" conaffinity="0"/>
+          <body name="camera_head">
+            <joint name="roll" axis="0 1 0" range="-0.35 0.35"/>
+            <geom type="box" size="0.07 0.06 0.04" mass="0.2" contype="0" conaffinity="0"/>
+            <camera name="rig" pos="0 0.09 0" xyaxes="1 0 0 0 0 1" fovy="45"/>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+  <actuator>
+    <position name="height" joint="height" kp="500" kv="60" ctrlrange="0.55 2.2"/>
+    <position name="pan" joint="pan" kp="80" kv="12" ctrlrange="-1.05 1.05"/>
+    <position name="tilt" joint="tilt" kp="80" kv="12" ctrlrange="-0.7 0.7"/>
+    <position name="roll" joint="roll" kp="60" kv="10" ctrlrange="-0.35 0.35"/>
+  </actuator>
+  <keyframe><key name="home" qpos="1.4 0 0 0" ctrl="1.4 0 0 0"/></keyframe>
+</mujoco>
