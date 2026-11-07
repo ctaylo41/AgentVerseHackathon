@@ -23,7 +23,7 @@ def sample_surface(points, maximum=256):
     return points[indices].copy()
 
 
-def execute_plan(sim, plan_path, scene_path, output, *, progress=print, preview=False, refine=False, max_adjustments=3):
+def execute_plan(sim, plan_path, scene_path, output, *, progress=print, preview=False, refine=False, max_adjustments=3, on_frame=None):
     if not 0 <= max_adjustments <= 6:
         raise ValueError('Refinement budget must be 0–6')
     plan_path, scene_path, output = Path(plan_path), Path(scene_path), Path(output)
@@ -54,6 +54,8 @@ def execute_plan(sim, plan_path, scene_path, output, *, progress=print, preview=
                   human_instructions_executed=False)
     trace = []
     def show(simulator, instruction=''):
+        if on_frame is not None:
+            on_frame(simulator, instruction)
         if preview:
             obs = simulator.capture()
             image = cv2.cvtColor(obs.rgb, cv2.COLOR_RGB2BGR)
@@ -90,6 +92,7 @@ def execute_plan(sim, plan_path, scene_path, output, *, progress=print, preview=
                                              max_adjustments=max_adjustments, progress=progress,
                                              show=show, trace=trace)
                     report['human_instructions_executed'] |= bool(refinement['rounds'])
+                    show(sim)
                 after = sim.save(folder/'after')
                 measured = evaluate(shot, scene, surfaces, after, perception.detect(after), perception.registry)
                 stable, max_stable = 0.0, 0.0

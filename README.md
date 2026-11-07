@@ -432,3 +432,52 @@ creative presenter step and two geometric product responses were verified from d
 The product-shot framing loss improved from 0.918 to 0.191. A stricter 50%-height
 close-up improved through three responses but stopped at the budget as unsatisfied,
 confirming that bounded refinement does not manufacture completion.
+
+## Milestone 7 — Robopod Studio
+
+Start the local browser app:
+
+```sh
+source .venv/bin/activate
+python -m robopod app
+```
+
+Open **http://127.0.0.1:8765** in your browser. Use `--port 8766` for another local
+port or `--output PATH` for a different run-output directory. Stop the app with Ctrl+C
+in its terminal. No additional packages, frontend build tools, CDN or hosting are used.
+
+The interface includes:
+1. **Restart simulation** — interrupts the current workflow, restores the room/rig,
+   clears the in-memory survey/plan/results and keeps all saved runs.
+2. **Explore scene** — surveys the 18 poses with live camera/perception, joint readings,
+   coverage progress, a sparse top-down map and current object visibility.
+3. **Creative brief / Generate Gemma plan** — calls your local Ollama installation,
+   displays the validated shot sequence and expandable JSON, and surfaces errors.
+4. **Load cooperative demo instead** — loads the explicitly labelled hand-authored
+   two-shot example. It does not pretend to be Gemma output and needs no model server.
+5. **Execute with teleprompter** — runs the selected plan with scripted responses,
+   bounded refinement, live instructions and per-shot result summaries. A sequence
+   before/after comparison and local output path appear when execution finishes.
+
+Survey first, then plan, then execute. Busy controls are disabled to avoid conflicting
+commands. New surveys clear old plans; execution restores the surveyed original room
+before starting, so rerunning a plan does not reuse an already-moved product. The
+creative brief in the browser is not overwritten by status updates or restart.
+
+The HTTP server binds only to **127.0.0.1**. Open that exact address (not `localhost`).
+The server reads copied snapshots/images; all MuJoCo physics/rendering runs on the
+main simulation-owner thread. Camera frames are throttled during motion, while probe
+searches run without changing the displayed executing camera. Robot motion and scripted
+responses are paced for watching; probe search can pause visible movement while it
+checks candidate compositions. Current camera images include perception overlays.
+
+Local Gemma planning runs in a separate worker without access to simulation state.
+Restart invalidates its result immediately; an already-running Ollama HTTP request may
+finish in the background, but its stale plan is not adopted. Another Gemma request is
+blocked until the earlier request returns. No previous output directory is deleted.
+
+The UI is a lightweight standard-library HTTP application, not a public server. Action
+requests require the local session token and same-origin/Host checks. It has no arbitrary
+file-serving or external-network endpoint. Do not expose it through a public tunnel.
+All artifacts remain under `outputs/studio/` by default. Supported scripted actions and
+remaining geometric limitations are unchanged from Milestone 6.

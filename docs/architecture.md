@@ -195,3 +195,18 @@ The product is now a mocap body as well as the person; geom/body identities and 
 four camera DOFs are preserved, so saved surveys remain readable. Scripted actor
 motion is kinematic demo behaviour without articulated grasp/walk physics. The local
 map uses observed geometry; mocap coordinates are used only to animate the response.
+
+## Milestone 7 implementation
+
+`app.py` provides AppState, Studio, OwnerSimulation and a loopback ThreadingHTTPServer.
+HTTP threads enqueue actions and read lock-protected copied JSON/JPEG/PNG snapshots;
+they never read/write MuJoCo. The main thread owns the simulator, renderer, live map
+and workflow transitions. OwnerSimulation.step supplies throttled frames and cancellation
+checks; execution's optional on_frame hook supplies instruction-bearing updates.
+
+Planning uses a separate daemon worker because Ollama can take minutes. Results carry
+an epoch so restart cannot accidentally apply an old plan. The worker uses saved data
+only, never live MjData/GL. Existing CLI entry points remain available. The frontend is
+packaged as assets/studio.html, with no JavaScript dependencies or build step; text is
+rendered through textContent, including model output. The cooperative demo JSON is
+packaged alongside the UI for installed-package use.

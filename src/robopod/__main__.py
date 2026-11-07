@@ -8,7 +8,8 @@ from .simulation import Simulation
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('mode', choices=['capture', 'viewer', 'explore', 'map', 'plan', 'execute'], nargs='?', default='capture')
+    parser.add_argument('mode', choices=['capture', 'viewer', 'explore', 'map', 'plan', 'execute', 'app'], nargs='?', default='capture')
+    parser.add_argument('--port', type=int, default=8765, help='Local app port')
     parser.add_argument('--refine', action='store_true', help='Enable teleprompter and scripted closed-loop responses')
     parser.add_argument('--max-adjustments', type=int, default=3, help='Subject-response budget per shot (0–6)')
     parser.add_argument('--plan', type=Path, help='Validated shot_plan.json for execute mode')
@@ -30,6 +31,10 @@ def main():
     parser.add_argument('--min-novelty', type=float, default=0.03)
     parser.add_argument('--settle-timeout', type=float, default=5.0)
     args = parser.parse_args()
+    if args.mode == 'app':
+        from .app import run_app
+        run_app(args.port, args.output or Path('outputs/studio'))
+        return
     if args.mode == 'execute':
         if args.plan is None or (args.scene_map is None and args.survey is None):
             parser.error('execute requires --plan and either --scene-map or --survey')
