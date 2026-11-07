@@ -11,6 +11,19 @@ class BriefTests(unittest.TestCase):
     def test_explicit_sequence_contract(self):
         self.assertEqual(requirements(BRIEF)['minimum_shots'],3)
         self.assertEqual(requirements('Start up close to the synthesizer then move out to the reviewer')['minimum_shots'],2)
+        user_brief = (
+            'Film a professional tech review: start as close as the robot can get to the synthesizer '
+            'then move up and then move back make sure we have room of thirds once pulled back with the '
+            'reviewer and synth in view move the camera around to keep the viewer interested while keeping '
+            'the rule of thirds'
+        )
+        req = requirements(user_brief)
+        self.assertEqual(req['minimum_shots'], 2)
+        self.assertTrue(req['starts_close'])
+        self.assertTrue(req['close_up_required'])
+        self.assertTrue(req['return_to_presenter'])
+        self.assertTrue(req['rule_of_thirds'])
+        self.assertTrue(req['movement_requested'])
         self.assertEqual(requirements('A single medium shot')['minimum_shots'],1)
         with self.assertRaisesRegex(PlanValidationError,'at least 3'):
             validate_brief(valid_plan(),BRIEF,SCENE)

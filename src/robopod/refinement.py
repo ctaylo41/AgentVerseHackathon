@@ -1,4 +1,5 @@
 """Bounded camera/subject cooperation; no hidden-state completion or LLM calls."""
+import re
 import numpy as np
 
 from .control import advance, move_to
@@ -6,6 +7,12 @@ from .exploration import _write_json
 from .mapping import SceneMap
 from .optimization import evaluate, optimize
 from .teleprompter import Teleprompter, creative_action, correction, respond, observe_response
+
+_CAMERA_OR_PERFORMATIVE_RE = re.compile(
+    r'camera|frame|shot|close to|close[ -]?up|move up|pull(?:ed)? back|zoom|pan|tilt|dolly|truck|sweep'
+    r'|thirds|in view|look at|present|review|explain|gesture|speak|talk|stand|hold',
+    re.IGNORECASE,
+)
 
 
 def refine_shot(sim, probe, shot, scene, surfaces, perception, folder, *, max_adjustments=3,
@@ -20,6 +27,12 @@ def refine_shot(sim, probe, shot, scene, surfaces, perception, folder, *, max_ad
     for entry in shot['human_instructions']:
         action = creative_action(entry['subject_id'], entry['instruction'])
         if action is None:
+            if _CAMERA_OR_PERFORMATIVE_RE.search(entry['instruction']):
+                if progress:
+                    progress(f"TELEPROMPTER [camera/performative note]: {entry['instruction']}")
+                if show:
+                    show(sim, entry['instruction'])
+                continue
             unsupported.append(dict(**entry, status='requires_manual_response'))
             if progress:
                 progress(f"TELEPROMPTER [manual response required]: {entry['instruction']}")
@@ -47,8 +60,8 @@ def refine_shot(sim, probe, shot, scene, surfaces, perception, folder, *, max_ad
         if instruction is None:
             stop = 'no_supported_correction'
             break
-        if sim.data.time < prompt.ready_at:
-            advance(sim, prompt.ready_at-sim.data.time, trace)
+        while sim.data.time < prompt.ready_at:
+            advance(sim, max(sim.model.opt.timestep, prompt.ready_at-sim.data.time), trace)
         if not prompt.issue(instruction, float(sim.data.time)):
             stop = 'repeat_or_direction_change_blocked'
             break
@@ -58,6 +71,10 @@ def refine_shot(sim, probe, shot, scene, surfaces, perception, folder, *, max_ad
                                                    unsupported=unsupported))
         old = detections
         old_metrics = metrics
+        saved_mocap = sim.data.mocap_pos.copy()
+        saved_ctrl = {name: float(sim.data.ctrl[sim.model.actuator(name).id]) for name in sim.axes}
+        saved_surfaces = {k: v.copy() for k, v in surfaces.items()}
+        saved_objects = {k: v.copy() for k, v in scene['objects'].items()}
         def display(state):
             if show:
                 show(state, instruction.text)
@@ -87,6 +104,14 @@ def refine_shot(sim, probe, shot, scene, surfaces, perception, folder, *, max_ad
             stop = 'response_not_observed'
             break
         if instruction.source == 'geometric' and metrics['loss'] >= old_metrics['loss']-.01:
+            if metrics['loss'] > old_metrics['loss'] and not metrics['satisfies_observed_criteria']:
+                sim.data.mocap_pos[:] = saved_mocap
+                surfaces.clear()
+                surfaces.update(saved_surfaces)
+                scene['objects'].update(saved_objects)
+                move_to(sim, saved_ctrl, trace=trace)
+                obs, detections = observe(f'restore_{index}')
+                metrics = old_metrics
             stop = 'no_progress'
             break
     if metrics['satisfies_observed_criteria'] and not creative:

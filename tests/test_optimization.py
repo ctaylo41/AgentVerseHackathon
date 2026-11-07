@@ -95,3 +95,87 @@ class OptimizationTests(unittest.TestCase):
             self.assertGreater(len(trace), 10)
             check_limits(sim)
 
+    def test_product_closeup_and_no_product_displacement_in_refinement(self):
+        import tempfile
+        from pathlib import Path
+        from robopod.refinement import refine_shot
+        with Simulation() as sim, Simulation() as probe, tempfile.TemporaryDirectory() as tmp:
+            obs = sim.capture()
+            perception = SegmentationPerception(geometry_catalog(sim))
+            detections = {d.identity.object_id: d for d in perception.detect(obs)}
+            surfaces = {k: sample_surface(d.points_world) for k, d in detections.items()}
+            scene = {
+                'objects': {'body:person': {'category': 'person', 'label': 'Presenter'},
+                            'body:product': {'category': 'instrument', 'label': 'Synthesizer'}},
+                'viewpoints': {'v0': {'joints': sim.configuration}}
+            }
+            initial_product_pos = sim.data.mocap_pos[int(sim.model.body('product').mocapid[0])].copy()
+            closeup = dict(
+                shot_id='shot_1', shot_type='close_up',
+                description='Start as close as the robot can get to the synthesizer then move up and move back',
+                duration_seconds=3.0, preferred_view_id='v0',
+                targets=[dict(object_id='body:product', center_x=0.333333, center_y=0.5, frame_height_fraction=0.2)],
+                human_instructions=[],
+                completion=dict(max_center_error=0.1, max_scale_error=0.08, min_visible_fraction=0.8,
+                                headroom_fraction=0.1, headroom_tolerance=0.1, hold_seconds=1.0),
+                background_object_ids=[], perspective='high_angle',
+            )
+            search1 = optimize(sim, probe, closeup, scene, surfaces)
+            self.assertGreater(search1['target']['height'], 0.95)
+            self.assertGreater(search1['target']['dolly'], 1.0)
+            self.assertTrue(search1['predicted_after']['satisfies_observed_criteria'])
+            move_to(sim, search1['target'])
+            s1_dir = Path(tmp)/'s1'
+            s1_dir.mkdir()
+            ref1 = refine_shot(sim, probe, closeup, scene, surfaces, perception, s1_dir, progress=None)
+            self.assertTrue(ref1['after']['satisfies_observed_criteria'])
+            np.testing.assert_allclose(
+                sim.data.mocap_pos[int(sim.model.body('product').mocapid[0])], initial_product_pos
+            )
+
+            medium = dict(
+                shot_id='shot_2', shot_type='medium',
+                description='Camera tracks from close to the synthesizer to a medium shot of the presenter with rule of thirds',
+                duration_seconds=3.0, preferred_view_id='v0',
+                targets=[
+                    dict(object_id='body:product', center_x=0.333333, center_y=0.5, frame_height_fraction=0.45),
+                    dict(object_id='body:person', center_x=0.333333, center_y=0.5, frame_height_fraction=0.45),
+                ],
+                human_instructions=[dict(
+                    subject_id='body:person',
+                    instruction='Start close to the synthesizer, then move up and then move back to frame the presenter with the product in view.',
+                )],
+                completion=dict(max_center_error=0.1, max_scale_error=0.1, min_visible_fraction=0.8,
+                                headroom_fraction=0.1, headroom_tolerance=0.1, hold_seconds=1.0),
+                background_object_ids=[], perspective='eye_level',
+            )
+            search2 = optimize(sim, probe, medium, scene, surfaces)
+            self.assertGreater(search2['target']['height'], 0.95)
+            move_to(sim, search2['target'])
+            s2_dir = Path(tmp)/'s2'
+            s2_dir.mkdir()
+            ref2 = refine_shot(sim, probe, medium, scene, surfaces, perception, s2_dir, progress=None)
+            self.assertEqual(ref2['pending_creative'], [])
+            self.assertTrue(ref2['after']['satisfies_observed_criteria'])
+            np.testing.assert_allclose(
+                sim.data.mocap_pos[int(sim.model.body('product').mocapid[0])], initial_product_pos
+            )
+            sweep2 = plan_sweep(sim, medium, scene, surfaces)
+            self.assertTrue(sweep2['continuous'])
+
+            # Verify generality on a relocated scene layout (non-default presenter and prop 3D positions).
+            sim.reset()
+            sim.data.mocap_pos[int(sim.model.body('product').mocapid[0])] = [-0.35, 0.72, 0.92]
+            sim.data.mocap_pos[int(sim.model.body('person').mocapid[0])] = [0.35, 1.60, 0.0]
+            import mujoco
+            mujoco.mj_forward(sim.model, sim.data)
+            obs_reloc = sim.capture()
+            det_reloc = {d.identity.object_id: d for d in perception.detect(obs_reloc)}
+            surf_reloc = {k: sample_surface(d.points_world) for k, d in det_reloc.items()}
+            closeup_reloc = copy.deepcopy(closeup)
+            closeup_reloc['targets'][0]['center_x'] = 0.666667
+            search_reloc = optimize(sim, probe, closeup_reloc, scene, surf_reloc)
+            self.assertTrue(search_reloc['predicted_after']['satisfies_observed_criteria'])
+
+
+

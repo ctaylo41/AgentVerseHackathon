@@ -6,16 +6,26 @@ from .planning import PlanValidationError
 
 def requirements(brief):
     text = brief.lower()
-    close = re.search(r'close[ -]?up|up close|detail shot', text)
-    reveal = re.search(r'zoom out|move out|pull back|widen|return to (?:the )?(?:presenter|reviewer)', text)
+    close = re.search(
+        r'close[ -]?up|up close|detail shot|as close as|get close'
+        r'|close to (?:the )?(?:synth|synthesizer|product|instrument|controls|keys)',
+        text,
+    )
+    reveal = re.search(
+        r'zoom out|move out|pull(?:ed)? back|move (?:up and (?:then )?)?back|back up'
+        r'|widen|return to (?:the )?(?:presenter|reviewer)',
+        text,
+    )
     sequence = bool(close and reveal)
-    starts_close = bool(close and re.search(r'start[^.!]*(?:close[ -]?up|up close)', text))
+    starts_close = bool(
+        close and re.search(r'start[^.!]*(?:close[ -]?up|up close|as close|get close|close to)', text)
+    )
     return dict(minimum_shots=2 if sequence and starts_close else 3 if sequence else 2 if close and 'then' in text else 1,
                 close_up_required=bool(close), return_to_presenter=bool(sequence),
                 starts_close=starts_close,
                 sequence_guidance=('close-up of product, then wider presenter shot' if starts_close else 'presenter and product, then product close-up, then wider presenter shot') if sequence else '',
-                rule_of_thirds=bool(re.search(r'rule of thirds|rule-of-thirds', text)),
-                movement_requested=bool(re.search(r'movement|motion|moition|pan|tilt|move (?:the )?camera|moving camera|sweep|track|dolly|orbit|crane', text)))
+                rule_of_thirds=bool(re.search(r'(?:rule|room)[ -]of[ -]thirds', text)),
+                movement_requested=bool(re.search(r'movement|motion|moition|pan|tilt|move (?:the )?camera|moving camera|move up|move back|pull(?:ed)? back|sweep|track|dolly|orbit|crane', text)))
 
 
 def validate_brief(plan, brief, scene):

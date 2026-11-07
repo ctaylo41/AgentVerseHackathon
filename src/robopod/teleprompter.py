@@ -1,6 +1,7 @@
 """One-at-a-time instructions and bounded, explicitly scripted mocap responses."""
 from dataclasses import dataclass, asdict
 import math
+import re
 
 import numpy as np
 
@@ -31,7 +32,7 @@ class Teleprompter:
 
     def issue(self, instruction, now):
         direction = self.last_direction.get((instruction.object_id, instruction.axis))
-        if self.active is not None or now < self.ready_at or instruction.key in self.failed:
+        if self.active is not None or now + 1e-9 < self.ready_at or instruction.key in self.failed:
             return False
         # Do not oscillate back and forth during one shot.
         if direction is not None and direction != instruction.key[2]:
@@ -83,9 +84,16 @@ def creative_action(subject_id, text):
 def correction(shot, measured, scene):
     # Camera has already been optimised. Check scale, lateral composition (e.g. rule-of-thirds), vertical height and occlusion.
     criteria = shot['completion']
+    explicit_prop_move = bool(re.search(
+        r'(?:bring|move|push|shift|slide|raise|lower|lift) (?:the )?(?:synth|synthesizer|product|instrument)',
+        shot.get('description', '').lower(),
+    ))
     for target in shot['targets']:
         key = target['object_id']
         if key not in ('body:person', 'body:product'):
+            continue
+        # Do not slide tabletop props during automatic geometric camera refinement unless explicitly requested.
+        if scene['objects'].get(key, {}).get('category') == 'instrument' and not explicit_prop_move and 'shot_type' in shot:
             continue
         metric = measured['targets'][key]
         actual = metric['framing']

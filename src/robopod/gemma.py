@@ -7,6 +7,7 @@ import base64
 import hashlib
 import json
 import math
+import re
 import socket
 
 import cv2
@@ -209,6 +210,13 @@ def generate_plan(survey, scene_path, brief, output, *, client=None, image_count
             stages = (['close_up', 'medium'] if intent['starts_close'] else
                       ['medium', 'close_up', 'medium'] if intent['return_to_presenter'] else
                       ['medium', 'close_up'])
+        subject_motion = bool(
+            re.search(
+                r'\b(?:step|walk|lean|raise|lower|lift)\b'
+                r'|(?:move|bring|push|shift) (?:the )?(?:product|synth|synthesizer|presenter|reviewer|person)',
+                brief.lower(),
+            )
+        )
         assembled = None
         for stage_index, stage_type in enumerate(stages):
             if progress:
@@ -223,7 +231,7 @@ def generate_plan(survey, scene_path, brief, output, *, client=None, image_count
                 fields['shot_type']['enum'] = [stage_type]
                 fields['description']['maxLength'] = 200
                 fields['feasibility_notes']['maxLength'] = 240
-                fields['human_instructions']['maxItems'] = 1
+                fields['human_instructions']['maxItems'] = 1 if subject_motion else 0
                 people = sorted(k for k,v in scene['objects'].items() if v['category']=='person')
                 products = sorted(k for k,v in scene['objects'].items() if v['category']=='instrument')
                 if people and products:
@@ -231,12 +239,28 @@ def generate_plan(survey, scene_path, brief, output, *, client=None, image_count
                                         [people[0], products[0]] if stage_index==0 else [people[0]])
                     fields['targets'].update(minItems=len(required_targets), maxItems=len(required_targets))
                     fields['targets']['items']['properties']['object_id']['enum'] = required_targets
+                    t_props = fields['targets']['items']['properties']
+                    c_props = fields['completion']['properties']
+                    if stage_type == 'close_up':
+                        t_props['frame_height_fraction'].update(minimum=0.15, maximum=0.23)
+                        t_props['center_y'].update(minimum=0.42, maximum=0.58)
+                        c_props['max_scale_error'].update(minimum=0.06, maximum=0.20)
+                        c_props['max_center_error'].update(minimum=0.08, maximum=0.20)
+                    elif required_targets == [people[0]]:
+                        t_props['frame_height_fraction'].update(minimum=0.38, maximum=0.56)
+                        t_props['center_y'].update(minimum=0.42, maximum=0.58)
+                        c_props['max_scale_error'].update(minimum=0.08, maximum=0.20)
+                        c_props['max_center_error'].update(minimum=0.08, maximum=0.20)
+                        c_props['headroom_tolerance'].update(minimum=0.08, maximum=0.20)
+                        if re.search(r'synth|product|instrument', brief.lower()):
+                            fields['background_object_ids'].update(minItems=1, maxItems=1)
+                            fields['background_object_ids']['items']['enum'] = [products[0]]
                 scope = (f'This request generates ONLY shot {stage_index+1} of {len(stages)}: {stage_type}. '
                          f'Return exactly ONE shot with shot_id shot_{stage_index+1}. The application assembles the sequence. '
                          'Overall minimum_shots is NOT the count for this individual response. '
                          f'Required target IDs: {required_targets}. Keep every string concise. '
-                         'When rule_of_thirds is active, place targets[0].center_x at 0.333333 or 0.666667 (and any second target on the opposite third 0.666667 or 0.333333). '
-                         'Use human_instructions=[] unless a supported scripted physical movement (e.g. "Step slightly to your left.") is needed.')
+                         'When rule_of_thirds is active, place targets[0].center_x at 0.333333 or 0.666667 (and if a second target is at the same lateral world X, align it on the same third). '
+                         'Never put camera movement instructions in human_instructions; use human_instructions=[] unless a supported physical actor step is explicitly requested.')
                 stage_messages[0]['content'] += '\n' + scope
                 stage_messages.append(dict(role='user', content=scope))
             _write_json(output/f'request_{stage_index+1}.schema.json', stage_schema)
