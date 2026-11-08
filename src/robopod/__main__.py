@@ -32,23 +32,40 @@ def main():
     parser.add_argument('--voxel-size', type=float, default=0.1)
     parser.add_argument('--min-novelty', type=float, default=0.03)
     parser.add_argument('--settle-timeout', type=float, default=5.0)
+    parser.add_argument('--yolo-model', default='', help='Optional local YOLO segmentation .pt file; never downloaded')
+    parser.add_argument('--pose-model', default='', help='Optional local MediaPipe pose .task file; never downloaded')
+    parser.add_argument('--adaptive-views', type=int, default=6, choices=range(13), help='Additional observation-driven survey budget')
+    parser.add_argument('--replan-budget', type=int, default=1, choices=range(3), help='Maximum Gemma retry plans after failed execution; 0 disables')
     args = parser.parse_args()
+    config=dict(yolo_model=args.yolo_model, pose_model=args.pose_model,
+                adaptive_views=args.adaptive_views, replan_budget=args.replan_budget)
     if args.mode == 'app':
         from .app import run_app
-        run_app(args.port, args.output or Path('outputs/studio'), survey=args.survey, plan_path=args.plan)
+        run_app(args.port, args.output or Path('outputs/studio'), survey=args.survey, plan_path=args.plan, config=config)
         return
     if args.mode == 'execute':
         if args.plan is None or (args.scene_map is None and args.survey is None):
             parser.error('execute requires --plan and either --scene-map or --survey')
         from datetime import datetime
-        from .execution import execute_plan
+        from .replanning import execute_with_replanning
         from .control import MotionError
+        from .safety import PathBlocked
         scene_path = args.scene_map or args.survey / 'semantic_map/scene_map.json'
         output = args.output or Path('outputs') / datetime.now().strftime('execution-%Y%m%d-%H%M%S-%f')
         try:
             with Simulation(args.width, args.height, args.fovy) as sim:
-                report = execute_plan(sim, args.plan, scene_path, output, preview=args.preview, refine=args.refine, max_adjustments=args.max_adjustments)
-        except (ValueError, OSError, MotionError) as error:
+                from .learned import build_backends, close_backends
+                from .perception import PerceptionPipeline
+                detector, pose, warnings = build_backends(config)
+                for warning in warnings: print(warning)
+                try:
+                    report = execute_with_replanning(sim, args.plan, scene_path, output,
+                        brief=args.brief, budget=args.replan_budget, preview=args.preview,
+                        refine=args.refine, max_adjustments=args.max_adjustments,
+                        perception=PerceptionPipeline(sim.geometry_catalog(),detector=detector,pose_estimator=pose))
+                finally:
+                    close_backends(detector,pose)
+        except (ValueError, OSError, MotionError, PathBlocked) as error:
             parser.exit(1, f'Execution failed: {error}\n')
         print(f"{report['status']}: {output.resolve() / 'execution_report.json'}")
         raise SystemExit(0 if report['status'] == 'completed' else 2)
@@ -72,7 +89,13 @@ def main():
             parser.error('map requires --survey')
         from .mapping import map_survey
         output = args.output or args.survey / 'semantic_map'
-        scene = map_survey(args.survey, output)
+        from .learned import build_backends, close_backends
+        detector, pose, warnings = build_backends(config)
+        for warning in warnings: print(warning)
+        try:
+            scene = map_survey(args.survey, output, detector=detector, pose_estimator=pose)
+        finally:
+            close_backends(detector,pose)
         print(f'Mapped {len(scene.objects)} persistent objects from {len(scene.viewpoints)} views to {output.resolve()}')
         return
     if args.output is None:
@@ -85,16 +108,24 @@ def main():
             def report(view, total):
                 print(f"{view['view_id']} / {total}: {view['status']}; "
                       f"coverage={view['cumulative_voxels']} surface voxels", flush=True)
-            result = explore(sim, args.output, voxel_size=args.voxel_size,
-                             min_novelty=args.min_novelty, settle_timeout=args.settle_timeout,
-                             progress=report)
+            from .learned import build_backends, close_backends
+            from .perception import PerceptionPipeline
+            detector, pose, warnings = build_backends(config)
+            for warning in warnings: print(warning)
+            try:
+                result = explore(sim, args.output, voxel_size=args.voxel_size,
+                                 min_novelty=args.min_novelty, settle_timeout=args.settle_timeout,
+                                 progress=report, adaptive_views=args.adaptive_views,
+                                 perception=PerceptionPipeline(sim.geometry_catalog(),detector=detector,pose_estimator=pose))
+            finally:
+                close_backends(detector,pose)
             print(f"{result['status']}: {result['saved_views']} views saved to {args.output.resolve()}")
             if result['status'] != 'completed':
                 raise SystemExit(1)
             return
-        sim.command(height=args.camera_height, truck=args.truck, dolly=args.dolly,
-                    pan=args.pan, tilt=args.tilt, roll=args.roll)
-        sim.step(3)
+        from .control import move_to
+        move_to(sim, dict(height=args.camera_height, truck=args.truck, dolly=args.dolly,
+                          pan=args.pan, tilt=args.tilt, roll=args.roll))
         if args.mode == 'capture':
             sim.save(args.output)
             print(f'Saved RGB, depth, segmentation and calibration to {args.output.resolve()}')

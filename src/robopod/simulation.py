@@ -26,6 +26,8 @@ class Simulation:
             raise ValueError("Resolution must fit 1920x1080 and be at least 16x16")
         if not math.isfinite(fovy) or not 10 <= fovy <= 120:
             raise ValueError("Vertical FOV must be 10–120 degrees")
+        from .artifacts import identity
+        self.artifact_identity = identity()
         self.model = mujoco.MjModel.from_xml_path(str(Path(__file__).parent / 'assets/room.xml'))
         self.data = mujoco.MjData(self.model)
         self.camera_id = self.model.camera('rig').id
@@ -33,7 +35,15 @@ class Simulation:
         self.width, self.height = width, height
         self.renderer = None
         self.axes = tuple(self.model.joint(i).name for i in range(self.model.njnt))
+        self._actor_body_quat = self.model.body_quat.copy()
+        self._actor_geom_pos = self.model.geom_pos.copy()
         self.reset()
+        from .safety import PathValidator
+        self.path_validator = PathValidator(self)
+
+    def checkpoint(self):
+        """Owner-thread cancellation/pause hook; headless simulations do not block."""
+        pass
 
     @property
     def limits(self):
@@ -44,6 +54,9 @@ class Simulation:
         return {name: float(self.data.joint(name).qpos[0]) for name in self.axes}
 
     def reset(self):
+        if hasattr(self, '_actor_body_quat'):
+            self.model.body_quat[:] = self._actor_body_quat
+            self.model.geom_pos[:] = self._actor_geom_pos
         mujoco.mj_resetDataKeyframe(self.model, self.data, 0)
         mujoco.mj_forward(self.model, self.data)
 
@@ -88,6 +101,18 @@ class Simulation:
         transform[:3, 3] = self.data.cam_xpos[self.camera_id]
         return Observation(rgb, depth, segmentation, k, transform, float(self.data.time), self.configuration)
 
+    def geometry_catalog(self):
+        result = {}
+        for i in range(self.model.ngeom):
+            body = int(self.model.geom_bodyid[i])
+            root = body
+            while self.model.body_parentid[root] > 0:
+                root = int(self.model.body_parentid[root])
+            result[str(i)] = dict(name=self.model.geom(i).name, body=self.model.body(body).name,
+                                  semantic_body=self.model.body(root).name or f'unnamed_{root}',
+                                  robot=self.model.body(root).name == 'carriage')
+        return result
+
     def save(self, directory, *, observation=None):
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
@@ -97,14 +122,12 @@ class Simulation:
         np.savez_compressed(directory / 'geometry.npz', depth_m=obs.depth_m,
                             segmentation=obs.segmentation, intrinsics=obs.intrinsics,
                             world_from_camera=obs.world_from_camera)
-        metadata = dict(simulation_time=obs.simulation_time, joints=obs.joints,
+        metadata = dict(artifact_identity=self.artifact_identity, simulation_time=obs.simulation_time, joints=obs.joints,
                         intrinsics=obs.intrinsics.tolist(), world_from_camera=obs.world_from_camera.tolist(),
                         width=self.width, height=self.height, fovy=float(self.model.cam_fovy[self.camera_id]),
                         axes='OpenCV: x right, y down, z forward; world z up; metres',
                         segmentation_channels=['object_id', 'object_type'],
-                        geoms={str(i): {'name': self.model.geom(i).name,
-                                       'body': self.model.body(int(self.model.geom_bodyid[i])).name}
-                               for i in range(self.model.ngeom)})
+                        geoms=self.geometry_catalog())
         (directory / 'metadata.json').write_text(json.dumps(metadata, indent=2))
         return obs
 

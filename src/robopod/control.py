@@ -19,7 +19,9 @@ def advance(sim, seconds, trace=None):
     """Check every physics step, not just rendered frames."""
     steps = max(1, math.ceil(seconds / sim.model.opt.timestep))
     for _ in range(steps):
+        sim.checkpoint()
         sim.step(sim.model.opt.timestep)
+        sim.path_validator.check(sim.data)
         check_limits(sim)
     if trace is not None:
         trace.append(dict(time=float(sim.data.time), joints=sim.configuration,
@@ -37,6 +39,8 @@ def move_to(sim, target, *, timeout=5.0, trace=None, callback=None):
         if not math.isfinite(value) or not lo <= value <= hi:
             raise ValueError(f'Invalid {name} target: {value}')
     check_limits(sim)
+    path = sim.path_validator.validate(sim.configuration, target)
+    sim.path_validator.validate(start, target)
     # Quintic smoothstep maximum derivative is 1.875; rates bound setpoint speed.
     duration = max(0.1, max(1.875*abs(target[n]-start[n])/RATES[n] for n in sim.axes))
     steps = math.ceil(duration/0.02)
@@ -55,7 +59,7 @@ def move_to(sim, target, *, timeout=5.0, trace=None, callback=None):
         slow = all(abs(float(sim.data.joint(n).qvel[0])) < 0.015 for n in sim.axes)
         stable = stable + 0.02 if close and slow else 0
         if stable >= 0.2:
-            return dict(settled=True, target=target, measured=sim.configuration)
+            return dict(settled=True, target=target, measured=sim.configuration, path_validation=path)
     raise MotionError('Actuators did not settle within the allowed time')
 
 

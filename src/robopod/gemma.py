@@ -14,7 +14,7 @@ import cv2
 
 from .exploration import _write_json
 from .brief import requirements, validate_brief
-from .planning import SHOT_PLAN_SCHEMA, PlanValidationError, parse_plan, scene_plan_schema
+from .planning import SHOT_PLAN_SCHEMA, PlanValidationError, parse_plan, scene_plan_schema, _validate, obj, array, text
 
 MODEL = 'gemma4:e2b'
 ENDPOINT = 'http://127.0.0.1:11434'
@@ -68,11 +68,19 @@ class OllamaClient:
         return dict(model=MODEL, digest=entry.get('digest'), capabilities=details.get('capabilities'))
 
     def chat(self, messages, *, schema=None):
-        response = self._request('/api/chat', dict(model=MODEL, messages=messages, stream=False,
-                                 format=SHOT_PLAN_SCHEMA if schema is None else schema, think=False, keep_alive='5m',
+        contract = SHOT_PLAN_SCHEMA if schema is None else schema
+        # The decoding grammar does not tell the model which fields it must write.
+        # Ground every request in its actual schema to avoid whitespace stalls at missing fields.
+        grounded = copy.deepcopy(messages) + [dict(role='user', content=(
+            'Return compact JSON, including every required field, without padding or markdown. '
+            'This is the exact output JSON schema: ' + json.dumps(contract, separators=(',', ':'))))]
+        response = self._request('/api/chat', dict(model=MODEL, messages=grounded, stream=False,
+                                 format=contract, think=False, keep_alive='5m',
                                  options=dict(temperature=0, seed=0, num_ctx=16384, num_predict=4096)))
         if response.get('done') is not True or response.get('done_reason') == 'length':
-            raise PlannerError('Ollama response was incomplete or hit its token limit')
+            error = PlannerError('Ollama response was incomplete or hit its token limit')
+            error.partial_content = response.get('message', {}).get('content', '')
+            raise error
         content = response.get('message', {}).get('content')
         if not isinstance(content, str) or not content.strip():
             raise PlannerError('Ollama returned no JSON content')
@@ -87,6 +95,9 @@ def prepare_context(survey, scene_path, brief, image_count=3):
     survey, scene_path = Path(survey), Path(scene_path)
     scene = json.loads(scene_path.read_text())
     manifest = json.loads((survey/'manifest.json').read_text())
+    from .artifacts import require_compatible
+    require_compatible(manifest.get('artifact_identity'))
+    require_compatible(scene.get('artifact_identity'), expected=manifest['artifact_identity'])
     if not scene.get('objects') or not scene.get('viewpoints'):
         raise ValueError('Scene map must contain observed objects and viewpoints')
     if len(scene['objects']) > 100 or len(scene['viewpoints']) > 200:
@@ -140,11 +151,11 @@ def prepare_context(survey, scene_path, brief, image_count=3):
         images.append(base64.b64encode(encoded).decode())
         image_records.append(dict(**item, source=str(path.resolve()), sha256=hashlib.sha256(encoded).hexdigest()))
     fields = ('category', 'label', 'position_world', 'observed_bounds_world', 'bounds_complete',
-              'dynamic', 'visibility', 'last_seen', 'source', 'confidence')
+              'dynamic', 'visibility', 'last_seen', 'source', 'confidence', 'parent_id')
     context = dict(creative_brief=brief.strip(),
-                   scene={key: {field: item[field] for field in fields} for key, item in scene['objects'].items()},
+                   scene={key: {field: item.get(field) for field in fields} for key, item in scene['objects'].items()},
                    rig=dict(joint_limits=manifest['limits'], units='metres and radians',
-                            constraints='6-DoF robotic camera arm (height, truck, dolly, pan, tilt, roll). Fixed FOV. Do not emit raw motor commands.'),
+                            constraints=f"Available axes: {', '.join(manifest['limits'])}. Use only these bounded axes. Fixed FOV; no optical zoom. Do not emit raw motor commands."),
                    allowed_person_ids=sorted(key for key, item in scene['objects'].items() if item['category'] == 'person'),
                    representative_views=selected,
                    geometry_caveat='Positions and bounds are partial observed surfaces, not full geometry. Visibility refers to last observation; images show different times.')
@@ -160,19 +171,46 @@ For show presenter/product → close-up controls → return to presenter, produc
 For rule of thirds, put each primary target center_x at 0.333 or 0.667.
 Image center_y is measured from the TOP; 1.0 is the bottom edge, not standing upright.
 Keep each target bounding box inside the frame. Do not reuse generic framing for every shot.
+For every target, frame_height_fraction/2 <= center_y <= 1-frame_height_fraction/2.
+Use center_y=0.5 when unsure. Required background objects must never also be targets.
 Continuous in-shot camera motion (smooth pedestal/pan/tilt tracking sweeps) is supported; optical zoom is not implemented—state zoom limitations honestly. Targets use normalized image coordinates
 (x right, y down). frame_height_fraction is each target's desired projected bounding-box height / image height.
 Completion center/scale errors are normalized absolute errors for every target; min_visible_fraction is the
 required fraction of each target's projected area that is visible. Headroom is space above a person's head
 as a fraction of image height; ignored when no person is targeted. Hold criteria continuously for hold_seconds.
-Do not promise physical feasibility: a fixed rail cannot orbit or dolly; a close-up may require moving the
-subject/product. State such limitations and needed repositioning in feasibility_notes. Preferred views are
+Use the supplied joint_limits as the authority for camera capabilities. Truck and dolly are available
+only when listed; bounded translation is not an unrestricted orbit. State uncertain feasibility in feasibility_notes. Preferred views are
 starting references, not a guarantee. Human instructions are actions spoken to a PERSON, never a camera or product.
 Use only person IDs for subject_id, even when asking someone to move a product; use [] if no person is present.
-The rail can move vertically and the gimbal can pan/tilt/roll; fixed rail does NOT mean the camera cannot move.
+Set motion to static unless the brief requests camera movement. Use push_in, pull_back, truck_left,
+truck_right, pedestal_up or pedestal_down for explicit translations; sweep means a bounded framing-preserving
+movement chosen by the controller, not a promise of a specific orbit or zoom. Set horizon to level unless
+an explicit positive Dutch-angle request appears in the brief.
+When the supplied schema omits direction, do not generate it: the app derives it from motion.
+Supply motion_parameters: amplitude_m (0 static, 0.02–1 moving), direction (none static, auto sweep,
+forward push_in, backward pull_back, left/right truck, up/down pedestal), subject_lock (target ID or none).
+Subject lock preserves that target’s framing through compensating pan/tilt. Use small amplitudes, e.g. 0.15 m. "No Dutch angle" means level.
+Never replace a requested subject with the first person or instrument in the scene. Preserve requested
+shot order and distinct subjects. Human instructions that cannot be simulated remain unresolved.
 When the brief asks for a sequence (e.g. presenter/product then controls close-up), include separate shots.
+Target part:product:controls or part:product:keys for requested detail shots when those IDs are supplied.
+Supported scripted human phrases: "turn your shoulders toward the camera", "turn toward the instrument",
+"look at the camera", "smile", "look at the camera and smile", "point to the controls",
+"hold the product near your face", "step closer to the camera", "step back", "step to your left",
+"step to your right", "raise the product", "lower the product". Use exact phrases for scripted responses.
 Do not invent objects.
 The deterministic controller will later check feasibility; this plan does not execute any motion.'''
+
+
+def decode_generated(content, schema):
+    """Validate model output first, then compile the redundant controller direction."""
+    from .planning import decode_json
+    from .motion import direction_for
+    value = decode_json(content)
+    _validate(value, schema)
+    for shot in value['shots']:
+        shot['motion_parameters']['direction'] = direction_for(shot['motion'])
+    return value
 
 
 def generate_plan(survey, scene_path, brief, output, *, client=None, image_count=3, progress=None):
@@ -188,12 +226,26 @@ def generate_plan(survey, scene_path, brief, output, *, client=None, image_count
     schema = scene_plan_schema(scene, allowed_views)
     intent = requirements(brief)
     schema['properties']['shots']['minItems'] = intent['minimum_shots']
+    if intent['exact_shots'] is not None:
+        schema['properties']['shots'].update(minItems=intent['exact_shots'], maxItems=intent['exact_shots'])
+    generated_shot = schema['properties']['shots']['items']
+    generated_shot['required'] += ['motion', 'horizon', 'motion_parameters']
+    if not intent['movement_requested']:
+        generated_shot['properties']['motion']['enum'] = ['static']
+        for key,value in dict(amplitude_m=0.,direction='none',subject_lock='none').items():
+            generated_shot['properties']['motion_parameters']['properties'][key]['enum']=[value]
+    if not intent['dutch_requested']:
+        generated_shot['properties']['horizon']['enum'] = ['level']
+    if intent['human_actions_forbidden']:
+        generated_shot['properties']['human_instructions']['maxItems']=0
+    if intent['centered_requested']:
+        for coordinate in ('center_x','center_y'):
+            generated_shot['properties']['targets']['items']['properties'][coordinate]['enum']=[.5]
     if intent['rule_of_thirds']:
         target_schema = schema['properties']['shots']['items']['properties']['targets']['items']['properties']
         target_schema['center_x']['enum'] = [0.333333, 0.5, 0.666667]
     target_schema = schema['properties']['shots']['items']['properties']['targets']['items']['properties']
-    target_schema['center_y'].update(minimum=0.35, maximum=0.65)
-    target_schema['frame_height_fraction']['maximum'] = 0.7
+    # Feasibility belongs to execution; do not force every shot into one framing preset.
     context['explicit_brief_requirements'] = intent
     context['execution_capabilities'] = 'Moves between shot compositions and executes continuous in-shot camera sweeps while holding framing. Optical zoom is not implemented; do not promise optical zoom.'
     report['creative_brief'] = brief
@@ -201,86 +253,114 @@ def generate_plan(survey, scene_path, brief, output, *, client=None, image_count
     report['capability_notes'] = (['Continuous in-shot camera sweep enabled; optical zoom is not supported on the fixed-FOV lens.'] if intent['movement_requested'] else [])
     _write_json(output/'context.json', context)
     _write_json(output/'shot_plan.schema.json', schema)
+    model_parameters = generated_shot['properties']['motion_parameters']
+    del model_parameters['properties']['direction']
+    model_parameters['required'].remove('direction')
+    report['direction_policy'] = 'Derived deterministically from motion mode; not generated by Gemma'
     messages = [dict(role='system', content=SYSTEM_PROMPT),
                 dict(role='user', content=json.dumps(context, allow_nan=False), images=images)]
     try:
         report['model_info'] = client.check_model()
         stages = [None]
-        if intent['minimum_shots'] > 1:
-            stages = (['close_up', 'medium'] if intent['starts_close'] else
-                      ['medium', 'close_up', 'medium'] if intent['return_to_presenter'] else
-                      ['medium', 'close_up'])
-        subject_motion = bool(
-            re.search(
-                r'\b(?:step|walk|lean|raise|lower|lift)\b'
-                r'|(?:move|bring|push|shift) (?:the )?(?:product|synth|synthesizer|presenter|reviewer|person)',
-                brief.lower(),
-            )
-        )
+        outline = None
+        # Interpret the whole sequence before making small per-shot requests. No fixed shot template.
+        if intent['minimum_shots'] > 1 or re.search(r'\b(?:then|next|finally|shots|sequence)\b', brief, re.I):
+            outline_schema = obj({'title': text(120), 'shots': array(obj({
+                'shot_id': text(40),
+                'shot_type': copy.deepcopy(schema['properties']['shots']['items']['properties']['shot_type']),
+                'description': text(300),
+                'target_ids': array(dict(type='string', enum=sorted(scene['objects'])), 1, 4),
+                'motion': copy.deepcopy(schema['properties']['shots']['items']['properties']['motion']),
+                'horizon': copy.deepcopy(schema['properties']['shots']['items']['properties']['horizon']),
+                'motion_parameters': copy.deepcopy(schema['properties']['shots']['items']['properties']['motion_parameters']),
+            }), intent['minimum_shots'], 6)})
+            if intent['exact_shots'] is not None:
+                outline_schema['properties']['shots'].update(minItems=intent['exact_shots'], maxItems=intent['exact_shots'])
+            _write_json(output/'outline.schema.json', outline_schema)
+            outline_messages = [dict(role='system', content=(
+                'Create a compact cinematic sequence outline matching the entire creative brief. '
+                'Return only the supplied JSON schema. Preserve every requested shot, subject and order. '
+                'Choose target_ids from the scene, never default to its first person/instrument. '
+                'A continuous move can be one shot; distinct requested compositions need separate shots. '
+                'Choose static unless movement is requested. Choose level unless a Dutch angle is explicitly requested. '
+                'Use pedestal_up/down for vertical movement, truck_left/right for lateral movement, '
+                'push_in/pull_back for forward/backward movement, and sweep only when the controller may choose the direction. '
+                'Do not emit direction: the app derives it from motion. Do not invent objects or ignore rig limits.')),
+                dict(role='user', content=json.dumps(context, allow_nan=False), images=images)]
+            for attempt in range(2):
+                if progress:
+                    progress('Gemma: interpreting the complete shot sequence…')
+                content = client.chat(outline_messages, schema=outline_schema)
+                (output/f'outline_response_{attempt+1}.txt').write_text(content)
+                try:
+                    outline = decode_generated(content, outline_schema)
+                    # Check sequence semantics before spending requests on individual shots.
+                    validation_shots = [dict(shot, targets=[dict(object_id=k, center_x=1/3 if intent['rule_of_thirds'] else .5,
+                                                               center_y=.5, frame_height_fraction=.3)
+                                                           for k in shot['target_ids']]) for shot in outline['shots']]
+                    validate_brief({'shots': validation_shots}, brief, scene)
+                    from .motion import validate as validate_motion
+                    for outlined in validation_shots:
+                        validate_motion(outlined)
+                    ids = [shot['shot_id'] for shot in outline['shots']]
+                    if len(ids) != len(set(ids)) or any(len(s['target_ids']) != len(set(s['target_ids'])) for s in outline['shots']):
+                        raise PlanValidationError('Outline contains duplicate shot or target IDs')
+                except (ValueError, TypeError, RecursionError) as error:
+                    report['attempts'].append(dict(stage='outline', attempt=attempt+1, validation_error=str(error)))
+                    if attempt == 1:
+                        raise PlannerError(f'Gemma returned invalid sequence outlines twice: {error}') from error
+                    outline_messages += [dict(role='assistant', content=content),
+                                         dict(role='user', content=f'Correct the complete outline: {error}')]
+                    continue
+                report['attempts'].append(dict(stage='outline', attempt=attempt+1, validation='passed'))
+                _write_json(output/'outline.json', outline)
+                stages = outline['shots']
+                break
         assembled = None
-        for stage_index, stage_type in enumerate(stages):
+        for stage_index, stage in enumerate(stages):
             if progress:
                 progress(f'Gemma: generating shot {stage_index+1}/{len(stages)}…')
             stage_schema = copy.deepcopy(schema)
             stage_messages = copy.deepcopy(messages)
-            required_targets = None
-            if stage_type is not None:
+            if stage is not None:
                 stage_schema['properties']['shots'].update(minItems=1, maxItems=1)
                 fields = stage_schema['properties']['shots']['items']['properties']
-                fields['shot_id']['enum'] = [f'shot_{stage_index+1}']
-                fields['shot_type']['enum'] = [stage_type]
-                fields['description']['maxLength'] = 200
-                fields['feasibility_notes']['maxLength'] = 240
-                fields['human_instructions']['maxItems'] = 1 if subject_motion else 0
-                people = sorted(k for k,v in scene['objects'].items() if v['category']=='person')
-                products = sorted(k for k,v in scene['objects'].items() if v['category']=='instrument')
-                if people and products:
-                    required_targets = ([products[0]] if stage_type=='close_up' else
-                                        [people[0], products[0]] if stage_index==0 else [people[0]])
-                    fields['targets'].update(minItems=len(required_targets), maxItems=len(required_targets))
-                    fields['targets']['items']['properties']['object_id']['enum'] = required_targets
-                    t_props = fields['targets']['items']['properties']
-                    c_props = fields['completion']['properties']
-                    if stage_type == 'close_up':
-                        t_props['frame_height_fraction'].update(minimum=0.15, maximum=0.23)
-                        t_props['center_y'].update(minimum=0.42, maximum=0.58)
-                        c_props['max_scale_error'].update(minimum=0.06, maximum=0.20)
-                        c_props['max_center_error'].update(minimum=0.08, maximum=0.20)
-                    elif required_targets == [people[0]]:
-                        t_props['frame_height_fraction'].update(minimum=0.38, maximum=0.56)
-                        t_props['center_y'].update(minimum=0.42, maximum=0.58)
-                        c_props['max_scale_error'].update(minimum=0.08, maximum=0.20)
-                        c_props['max_center_error'].update(minimum=0.08, maximum=0.20)
-                        c_props['headroom_tolerance'].update(minimum=0.08, maximum=0.20)
-                        if re.search(r'synth|product|instrument', brief.lower()):
-                            fields['background_object_ids'].update(minItems=1, maxItems=1)
-                            fields['background_object_ids']['items']['enum'] = [products[0]]
-                scope = (f'This request generates ONLY shot {stage_index+1} of {len(stages)}: {stage_type}. '
-                         f'Return exactly ONE shot with shot_id shot_{stage_index+1}. The application assembles the sequence. '
-                         'Overall minimum_shots is NOT the count for this individual response. '
-                         f'Required target IDs: {required_targets}. Keep every string concise. '
-                         'When rule_of_thirds is active, place targets[0].center_x at 0.333333 or 0.666667 (and if a second target is at the same lateral world X, align it on the same third). '
-                         'Never put camera movement instructions in human_instructions; use human_instructions=[] unless a supported physical actor step is explicitly requested.')
+                for name in ('shot_id', 'shot_type', 'motion', 'horizon'):
+                    fields[name]['enum'] = [stage[name]]
+                fields['motion_parameters'] = obj({k: dict(fields['motion_parameters']['properties'][k], enum=[v])
+                                                   for k,v in stage['motion_parameters'].items() if k != 'direction'})
+                fields['targets'].update(minItems=len(stage['target_ids']), maxItems=len(stage['target_ids']))
+                fields['targets']['items']['properties']['object_id']['enum'] = stage['target_ids']
+                backgrounds = sorted(set(scene['objects']) - set(stage['target_ids']))
+                if backgrounds:
+                    fields['background_object_ids']['items']['enum'] = backgrounds
+                else:
+                    fields['background_object_ids']['maxItems'] = 0
+                scope = (f'Generate ONLY shot {stage_index+1} of {len(stages)} from this outline. '
+                         'Return exactly ONE shot; the app assembles the sequence. '
+                         'Do not obey the overall minimum_shots count for this individual response. '
+                         'Preserve this shot’s target order, motion, horizon and intent. '
+                         f'Complete outline: {json.dumps(outline)}. Current shot: {json.dumps(stage)}.')
                 stage_messages[0]['content'] += '\n' + scope
                 stage_messages.append(dict(role='user', content=scope))
             _write_json(output/f'request_{stage_index+1}.schema.json', stage_schema)
             for attempt in range(2):
                 content = client.chat(stage_messages, schema=stage_schema)
-                filename = f'response_{attempt+1}.txt' if stage_type is None else f'shot_{stage_index+1}_response_{attempt+1}.txt'
+                filename = f'response_{attempt+1}.txt' if stage is None else f'shot_{stage_index+1}_response_{attempt+1}.txt'
                 (output/filename).write_text(content)
                 try:
-                    plan = parse_plan(content, scene, allowed_views)
-                    if stage_type is None:
+                    generated = decode_generated(content, stage_schema)
+                    plan = parse_plan(json.dumps(generated), scene, allowed_views)
+                    if stage is None:
                         validate_brief(plan, brief, scene)
                     else:
-                        if len(plan['shots']) != 1 or plan['shots'][0]['shot_type'] != stage_type:
-                            raise PlanValidationError(f'Return exactly one {stage_type} shot for this request.')
                         shot = plan['shots'][0]
-                        if shot['shot_id'] != f'shot_{stage_index+1}':
-                            raise PlanValidationError(f'Use shot_id shot_{stage_index+1}.')
-                        if required_targets and {t['object_id'] for t in shot['targets']} != set(required_targets):
-                            raise PlanValidationError(f'This shot must target exactly {required_targets}.')
-                        validate_brief(plan, 'Rule of thirds' if intent['rule_of_thirds'] else '', scene)
+                        if [t['object_id'] for t in shot['targets']] != stage['target_ids']:
+                            raise PlanValidationError(f"Preserve outlined target order: {stage['target_ids']}")
+                        # Overall sequence requirements are checked after assembly.
+                        validate_brief(plan, ('Rule of thirds. ' if intent['rule_of_thirds'] else '')
+                                       + ('Camera movement. ' if intent['movement_requested'] else '')
+                                       + ('Dutch angle.' if intent['dutch_requested'] else ''), scene)
                 except PlanValidationError as error:
                     report['attempts'].append(dict(stage=stage_index+1, attempt=attempt+1, validation_error=str(error)))
                     if attempt == 1:
@@ -291,6 +371,8 @@ def generate_plan(survey, scene_path, brief, output, *, client=None, image_count
                 report['attempts'].append(dict(stage=stage_index+1, attempt=attempt+1, validation='passed'))
                 if assembled is None:
                     assembled = plan
+                    if outline is not None:
+                        assembled['title'] = outline['title']
                 else:
                     assembled['shots'].extend(plan['shots'])
                 _write_json(output/'planning_report.json', report)
@@ -301,6 +383,8 @@ def generate_plan(survey, scene_path, brief, output, *, client=None, image_count
         report['status'] = 'validated'
         return assembled
     except BaseException as error:
+        if getattr(error, 'partial_content', None):
+            (output/'partial_response.txt').write_text(error.partial_content)
         report.update(status='failed', error=f'{type(error).__name__}: {error}')
         raise
     finally:

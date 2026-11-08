@@ -47,6 +47,7 @@ def visibility(points, obs, depth_tolerance=0.08):
 
 class SceneMap:
     def __init__(self, voxel_size=0.08, max_points=2048):
+        self.artifact_identity = None
         if not np.isfinite(voxel_size) or voxel_size <= 0 or max_points < 1:
             raise ValueError('Positive voxel size and point limit required')
         self.voxel_size, self.max_points = voxel_size, max_points
@@ -89,9 +90,10 @@ class SceneMap:
             self.points[object_id] = _sparse(points, self.voxel_size, self.max_points)
             record['seen_from'].append(view_id)
             record['observation_count'] += 1
+            record.update(category=identity.category, label=identity.label, parent_id=identity.parent_id)
             record.update(last_seen=obs.simulation_time, visibility='visible', visibility_view_id=view_id,
                           visibility_basis='segmented_pixels', confidence=detection.confidence,
-                          confidence_meaning='configured simulator identity; not geometry completeness',
+                          confidence_meaning='learned label confidence' if detection.source.startswith('learned') else 'unclassified instance; category unknown' if identity.category=='unknown' else 'configured simulator identity; not geometry completeness',
                           source=detection.source, bbox_xyxy=detection.bbox_xyxy,
                           last_bbox_view_id=view_id,
                           position_world=((observed_min + observed_max)/2).tolist(),
@@ -103,7 +105,7 @@ class SceneMap:
         return self.to_dict()
 
     def to_dict(self):
-        return dict(schema_version=1, coordinate_frame='world, metres, Z up',
+        return dict(artifact_identity=self.artifact_identity, schema_version=2, coordinate_frame='world, metres, Z up',
                     voxel_size_m=self.voxel_size, max_points_per_object=self.max_points,
                     latest_simulation_time=self.last_time if self.viewpoints else None,
                     objects=self.objects, viewpoints=self.viewpoints)
@@ -165,7 +167,9 @@ def map_survey(survey, output, *, detector=None, pose_estimator=None):
         raise ValueError('Survey has no saved observations')
     output.mkdir(parents=True, exist_ok=False)
     scene = SceneMap()
+    scene.artifact_identity = manifest.get('artifact_identity')
     report = dict(status='running', source_survey=str(survey.resolve()), views=[])
+    pipeline = None
     try:
         for view in views:
             view_id = view['view_id']
@@ -173,7 +177,10 @@ def map_survey(survey, output, *, detector=None, pose_estimator=None):
             if Path(view_id).name != view_id or view_id in ('.', '..'):
                 raise ValueError('Invalid survey view ID')
             obs, metadata = load_observation(survey / view_id)
-            pipeline = PerceptionPipeline(metadata['geoms'], detector=detector, pose_estimator=pose_estimator)
+            if metadata.get('artifact_identity') != scene.artifact_identity:
+                raise ValueError('Mixed scene/robot versions in survey observations')
+            if pipeline is None:
+                pipeline = PerceptionPipeline(metadata['geoms'], detector=detector, pose_estimator=pose_estimator)
             detections, supplemental = pipeline.process(obs)
             scene.update(detections, obs, view_id)
             target = output / view_id

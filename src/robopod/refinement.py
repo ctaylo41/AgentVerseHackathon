@@ -1,5 +1,4 @@
 """Bounded camera/subject cooperation; no hidden-state completion or LLM calls."""
-import re
 import numpy as np
 
 from .control import advance, move_to
@@ -8,13 +7,6 @@ from .mapping import SceneMap
 from .optimization import evaluate, optimize
 from .teleprompter import Teleprompter, creative_action, correction, respond, observe_response
 
-_CAMERA_OR_PERFORMATIVE_RE = re.compile(
-    r'camera|frame|shot|close to|close[ -]?up|move up|pull(?:ed)? back|zoom|pan|tilt|dolly|truck|sweep'
-    r'|thirds|in view|look at|present|review|explain|gesture|speak|talk|stand|hold',
-    re.IGNORECASE,
-)
-
-
 def refine_shot(sim, probe, shot, scene, surfaces, perception, folder, *, max_adjustments=3,
                 progress=print, show=None, trace=None):
     from .execution import sample_surface
@@ -22,17 +14,12 @@ def refine_shot(sim, probe, shot, scene, surfaces, perception, folder, *, max_ad
         raise ValueError('Refinement budget must be 0–6 adjustments')
     prompt = Teleprompter()
     local_map = SceneMap()
+    local_map.artifact_identity = getattr(sim, 'artifact_identity', None)
     rounds, unsupported = [], []
     creative = []
     for entry in shot['human_instructions']:
         action = creative_action(entry['subject_id'], entry['instruction'])
         if action is None:
-            if _CAMERA_OR_PERFORMATIVE_RE.search(entry['instruction']):
-                if progress:
-                    progress(f"TELEPROMPTER [camera/performative note]: {entry['instruction']}")
-                if show:
-                    show(sim, entry['instruction'])
-                continue
             unsupported.append(dict(**entry, status='requires_manual_response'))
             if progress:
                 progress(f"TELEPROMPTER [manual response required]: {entry['instruction']}")
@@ -72,6 +59,8 @@ def refine_shot(sim, probe, shot, scene, surfaces, perception, folder, *, max_ad
         old = detections
         old_metrics = metrics
         saved_mocap = sim.data.mocap_pos.copy()
+        saved_body_quat = sim.model.body_quat.copy()
+        saved_geom_pos = sim.model.geom_pos.copy()
         saved_ctrl = {name: float(sim.data.ctrl[sim.model.actuator(name).id]) for name in sim.axes}
         saved_surfaces = {k: v.copy() for k, v in surfaces.items()}
         saved_objects = {k: v.copy() for k, v in scene['objects'].items()}
@@ -80,7 +69,7 @@ def refine_shot(sim, probe, shot, scene, surfaces, perception, folder, *, max_ad
                 show(state, instruction.text)
         applied = respond(sim, instruction, callback=display, trace=trace)
         obs, detections = observe(f'response_{index}')
-        observed, evidence = observe_response(old, detections, instruction)
+        observed, evidence = observe_response(old, detections, instruction, obs.world_from_camera[:3,3])
         prompt.finish(float(sim.data.time), observed, evidence)
         # Replace only changed geometry with fresh observed pixels, never scripted target coordinates.
         for detection in detections:
@@ -105,6 +94,8 @@ def refine_shot(sim, probe, shot, scene, surfaces, perception, folder, *, max_ad
             break
         if instruction.source == 'geometric' and metrics['loss'] >= old_metrics['loss']-.01:
             if metrics['loss'] > old_metrics['loss'] and not metrics['satisfies_observed_criteria']:
+                sim.model.body_quat[:] = saved_body_quat
+                sim.model.geom_pos[:] = saved_geom_pos
                 sim.data.mocap_pos[:] = saved_mocap
                 surfaces.clear()
                 surfaces.update(saved_surfaces)
@@ -121,7 +112,7 @@ def refine_shot(sim, probe, shot, scene, surfaces, perception, folder, *, max_ad
         pending += [dict(instruction=h['text'], status=h['status']) for h in prompt.history if h['source']=='creative' and h['status']!='completed']
     result = dict(stop_reason=stop, rounds=rounds, instructions=prompt.history, pending_creative=pending,
                   before=initial_metrics, after=metrics,
-                  changed_scene=bool(rounds), model_replan_needed=not metrics['satisfies_observed_criteria'])
+                  changed_scene=bool(rounds), model_replan_needed=bool(pending) or not metrics['satisfies_observed_criteria'])
     _write_json(folder/'teleprompter.json', dict(active=None, history=prompt.history, pending_creative=pending))
     _write_json(folder/'refinement.json', result)
     local_map.save(folder)

@@ -47,12 +47,15 @@ def move_and_settle(sim, target, timeout=5.0):
     """
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError('Settle timeout must be finite and positive')
+    full_target = dict(sim.configuration, **target)
+    sim.path_validator.validate(sim.configuration, full_target)
     sim.command(**target)
     start = sim.data.time
     stable = 0
     errors, speed = [float('inf')], float('inf')
     while sim.data.time - start < timeout:
-        sim.step(0.02)
+        from .control import advance
+        advance(sim, 0.02)
         errors = [abs(sim.configuration[name] - value) for name, value in target.items()]
         close = all(error <= (0.04 if name == 'height' else 0.015)
                     for name, error in zip(target, errors))
@@ -103,7 +106,7 @@ def _write_json(path, value):
 
 
 def explore(sim: Simulation, directory, *, voxel_size=0.1, min_novelty=0.03,
-            settle_timeout=5.0, progress=None):
+            settle_timeout=5.0, progress=None, adaptive_views=6, perception=None):
     """Save a reproducible survey in a new directory, refusing overwrites.
 
     Coverage includes retained observations only. Skip redundant candidates unless
@@ -113,26 +116,53 @@ def explore(sim: Simulation, directory, *, voxel_size=0.1, min_novelty=0.03,
         raise ValueError('Minimum novelty must be in [0, 1]')
     if not math.isfinite(settle_timeout) or settle_timeout <= 0:
         raise ValueError('Settle timeout must be finite and positive')
+    if not isinstance(adaptive_views,int) or not 0 <= adaptive_views <= 12:
+        raise ValueError('Adaptive view budget must be 0–12')
+    from .adaptive import AdaptiveViews
+    from .perception import SegmentationPerception
+    from .safety import PathBlocked
+    policy = AdaptiveViews(sim)
+    perception = perception or SegmentationPerception(sim.geometry_catalog())
     coverage = SurfaceCoverage(voxel_size)
     poses = survey_poses(sim.limits)
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=False)
-    manifest = dict(schema_version=1, status='running', pattern='serpentine-3x3x2-v1',
-                    candidate_count=len(poses), voxel_size_m=voxel_size, pixel_stride=coverage.stride,
+    manifest = dict(artifact_identity=sim.artifact_identity, schema_version=2, status='running', pattern='baseline-18-plus-adaptive-v1',
+                    candidate_count=len(poses)+adaptive_views, adaptive_budget=adaptive_views, voxel_size_m=voxel_size, pixel_stride=coverage.stride,
                     min_novelty=min_novelty, coverage_definition='unique observed surface voxels; no total-room percentage',
                     initial_joints=sim.configuration, limits=sim.limits, views=[])
     thumbnails = []
     try:
-        for index, target in enumerate(poses):
-            result = move_and_settle(sim, target, settle_timeout)
+        low_gain = 0
+        for index in range(len(poses)+adaptive_views):
+            decision = None
+            if index < len(poses):
+                target = poses[index]
+            else:
+                choice = policy.choose()
+                if choice is None or low_gain >= 2:
+                    manifest['adaptive_stop'] = 'no_useful_candidates' if choice is None else 'novelty_converged'
+                    break
+                target,decision = choice
+            try:
+                result = move_and_settle(sim, target, settle_timeout)
+            except PathBlocked as error:
+                record = dict(view_id=f'view_{index:03d}', target_joints=target, status='blocked',
+                              reason=str(error), files=None, cumulative_voxels=len(coverage.cells), adaptive=decision)
+                manifest['views'].append(record)
+                if progress: progress(record,manifest['candidate_count'])
+                continue
             record = dict(view_id=f'view_{index:03d}', target_joints=target,
                           measured_joints=sim.configuration, simulation_time=float(sim.data.time),
-                          settling=vars(result), status='unsettled', files=None)
+                          settling=vars(result), status='unsettled', files=None, adaptive=decision)
             if result.settled:
                 obs = sim.capture()
+                policy.observe(obs,perception.detect(obs))
                 cells, ids = coverage.measure(obs)
                 new_cells, new_ids = cells - coverage.cells, ids - coverage.geom_ids
                 novelty = len(new_cells) / max(1, len(cells))
+                if decision is not None:
+                    low_gain = low_gain+1 if novelty < min_novelty else 0
                 record.update(visible_geom_ids=sorted(ids), observed_voxels=len(cells),
                               new_voxels=len(new_cells), novelty_fraction=novelty)
                 if cells and (not coverage.cells or new_ids or novelty >= min_novelty):
@@ -151,7 +181,7 @@ def explore(sim: Simulation, directory, *, voxel_size=0.1, min_novelty=0.03,
             manifest['views'].append(record)
             _write_json(directory / 'manifest.json', manifest)
             if progress:
-                progress(record, len(poses))
+                progress(record, manifest['candidate_count'])
         manifest['status'] = 'completed' if all(v['status'] != 'unsettled' for v in manifest['views']) else 'completed_with_failures'
         if not coverage.cells:
             manifest['status'] = 'failed'

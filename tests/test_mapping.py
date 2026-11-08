@@ -33,7 +33,7 @@ class MappingTests(unittest.TestCase):
     def test_grouping_mask_geometry_and_pose_provenance(self):
         obs = observation()
         detections = SegmentationPerception(GEOMS).detect(obs)
-        self.assertEqual({d.identity.object_id for d in detections}, {'body:person', 'body:product', 'body:desk'})
+        self.assertEqual({d.identity.object_id for d in detections}, {'body:person', 'body:product', 'body:desk', 'part:product:keys'})
         person = next(d for d in detections if d.identity.category == 'person')
         self.assertEqual(person.bbox_xyxy, [0, 0, 2, 2])
         self.assertEqual(person.mask.sum(), 4)
@@ -50,7 +50,7 @@ class MappingTests(unittest.TestCase):
         obs2 = replace(observation(1), world_from_camera=np.eye(4))
         obs2.world_from_camera[0, 3] = 10
         scene.update(pipeline.detect(obs2), obs2, 'b')
-        self.assertEqual(len(scene.objects), 3)
+        self.assertEqual(len(scene.objects), 4)
         person = scene.objects['body:person']
         self.assertEqual(person['observation_count'], 2)
         self.assertEqual(person['seen_from'], ['a', 'b'])
@@ -65,7 +65,7 @@ class MappingTests(unittest.TestCase):
             scene.save(tmp)
             self.assertTrue((Path(tmp)/'scene_map.json').exists())
             with np.load(Path(tmp)/'object_surfaces.npz', allow_pickle=False) as data:
-                self.assertEqual(len(data.files), 3)
+                self.assertEqual(len(data.files), 4)
 
     def test_visibility_and_landmark_clearing(self):
         obs = observation()
@@ -92,7 +92,7 @@ class MappingTests(unittest.TestCase):
             def estimate(self, rgb):
                 return [{'source': 'test', 'landmarks': []}]
         detections, extra = PerceptionPipeline(GEOMS, detector=BrokenDetector(), pose_estimator=Pose()).process(observation())
-        self.assertEqual(len(detections), 3)
+        self.assertEqual(len(detections), 4)
         self.assertEqual(len(extra['warnings']), 1)
         self.assertEqual(len(extra['learned_poses']), 1)
         _, disabled = PerceptionPipeline(GEOMS).process(observation())
@@ -117,7 +117,7 @@ class MappingTests(unittest.TestCase):
             (survey/'manifest.json').write_text(json.dumps(dict(views=views)))
             output = Path(tmp)/'map'
             scene = map_survey(survey, output)
-            self.assertEqual(len(scene.objects), 3)
+            self.assertEqual(len(scene.objects), 4)
             self.assertEqual(scene.objects['body:person']['observation_count'], 2)
             self.assertEqual(json.loads((output/'mapping_report.json').read_text())['status'], 'completed')
             self.assertTrue((output/'view_001/masks.npz').is_file())

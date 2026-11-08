@@ -1,0 +1,12 @@
+{
+  "yolo11n-seg.pt": {
+    "source": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n-seg.pt",
+    "bytes": 6182636,
+    "sha256": "55ed65c56c91713d23e8402371c6c49a6fd84f257f7dce452e8d70e41dcbe152"
+  },
+  "pose_landmarker_lite.task": {
+    "source": "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
+    "bytes": 5777746,
+    "sha256": "59929e1d1ee95287735ddd833b19cf4ac46d29bc7afddbbf6753c459690d574a"
+  }
+}

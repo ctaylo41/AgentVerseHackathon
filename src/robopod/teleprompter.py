@@ -15,10 +15,11 @@ class Instruction:
     text: str
     axis: int
     displacement: float
+    action: str = 'translate'
 
     @property
     def key(self):
-        return (self.object_id, self.axis, int(np.sign(self.displacement)))
+        return (self.object_id, self.axis, int(np.sign(self.displacement)), self.action)
 
 
 class Teleprompter:
@@ -31,14 +32,14 @@ class Teleprompter:
         self.last_direction = {}
 
     def issue(self, instruction, now):
-        direction = self.last_direction.get((instruction.object_id, instruction.axis))
+        direction = self.last_direction.get((instruction.object_id, instruction.axis, instruction.action))
         if self.active is not None or now + 1e-9 < self.ready_at or instruction.key in self.failed:
             return False
         # Do not oscillate back and forth during one shot.
         if direction is not None and direction != instruction.key[2]:
             return False
         self.active = instruction
-        self.last_direction[(instruction.object_id, instruction.axis)] = instruction.key[2]
+        self.last_direction[(instruction.object_id, instruction.axis, instruction.action)] = instruction.key[2]
         self.history.append(dict(**asdict(instruction), issued_at=now, status='active'))
         return True
 
@@ -55,7 +56,18 @@ class Teleprompter:
 
 def creative_action(subject_id, text):
     """Small exact phrase vocabulary; never guess arbitrary natural-language actions."""
+    if subject_id != 'body:person':
+        return None  # Unfamiliar people have no configured scripted actor.
     normalized = text.lower().strip().rstrip('.!')
+    performances = {
+        'turn your shoulders toward the camera': 'turn_to_camera', 'turn toward the camera': 'turn_to_camera',
+        'turn toward the instrument': 'turn_to_product', 'turn toward the synthesizer': 'turn_to_product',
+        'look at the camera': 'look_at_camera', 'look at the camera and smile': 'look_and_smile',
+        'smile': 'smile', 'point to the controls': 'point_to_product', 'point to the product': 'point_to_product',
+        'hold the product closer to your face': 'hold_near_face', 'hold the product near your face': 'hold_near_face',
+    }
+    if normalized in performances:
+        return Instruction('creative',subject_id,text,-1,0.,performances[normalized])
     phrases = {
         'step to your left': (0, .25), 'step slightly to your left': (0, .25),
         'move to your left': (0, .25), 'move slightly to your left': (0, .25), 'take a step left': (0, .25),
@@ -90,10 +102,11 @@ def correction(shot, measured, scene):
     ))
     for target in shot['targets']:
         key = target['object_id']
-        if key not in ('body:person', 'body:product'):
+        actor_key = scene['objects'].get(key, {}).get('parent_id') or key
+        if actor_key not in ('body:person', 'body:product'):
             continue
         # Do not slide tabletop props during automatic geometric camera refinement unless explicitly requested.
-        if scene['objects'].get(key, {}).get('category') == 'instrument' and not explicit_prop_move and 'shot_type' in shot:
+        if scene['objects'].get(actor_key, {}).get('category') == 'instrument' and not explicit_prop_move and 'shot_type' in shot:
             continue
         metric = measured['targets'][key]
         actual = metric['framing']
@@ -103,24 +116,27 @@ def correction(shot, measured, scene):
         if metric.get('scale_error', 0.0) > criteria.get('max_scale_error', 1.0):
             closer = actual['frame_height_fraction'] < target['frame_height_fraction']
             delta = -.5 if closer else .5
-            return Instruction('geometric', key, f'Move {label} {"closer to" if closer else "farther from"} the camera.', 1, delta)
+            return Instruction('geometric', actor_key, f'Move {label} {"closer to" if closer else "farther from"} the camera.', 1, delta)
         if 'center_x' in target and 'center_y' in target and metric.get('center_error', 0.0) > criteria.get('max_center_error', 1.0):
             dx = target['center_x'] - actual['center_x']
             dy = target['center_y'] - actual['center_y']
-            if abs(dx) >= abs(dy) or key != 'body:product':
+            if abs(dx) >= abs(dy) or actor_key != 'body:product':
                 # In the camera frame (+X right), positive world X shifts target right (+center_x).
                 delta = .25 if dx > 0 else -.25
-                direction = 'to your left' if key == 'body:person' and delta > 0 else 'to your right' if key == 'body:person' else 'to the left' if delta > 0 else 'to the right'
-                return Instruction('geometric', key, f'Move {label} {direction} to align with the composition.', 0, delta)
+                direction = 'to your left' if actor_key == 'body:person' and delta > 0 else 'to your right' if actor_key == 'body:person' else 'to the left' if delta > 0 else 'to the right'
+                return Instruction('geometric', actor_key, f'Move {label} {direction} to align with the composition.', 0, delta)
             delta = -.15 if dy > 0 else .15
-            return Instruction('geometric', key, f'Move {label} {"lower" if delta < 0 else "higher"} in frame.', 2, delta)
+            return Instruction('geometric', actor_key, f'Move {label} {"lower" if delta < 0 else "higher"} in frame.', 2, delta)
         if metric.get('visible_surface_fraction', 1.0) < criteria.get('min_visible_fraction', 0.0):
-            return Instruction('geometric', key, f'Move {label} slightly to clear occlusion.', 0, .25 if key == 'body:person' else -.25)
+            return Instruction('geometric', actor_key, f'Move {label} slightly to clear occlusion.', 0, .25 if actor_key == 'body:person' else -.25)
     return None
 
 
 def respond(sim, instruction, *, callback=None, trace=None):
     """Kinematic demo actor, not a physically simulated grasp or walking controller."""
+    if instruction.action != 'translate':
+        from .actors import perform
+        return perform(sim,instruction.action,callback,trace)
     name = instruction.object_id.removeprefix('body:')
     if name not in ('person','product') or instruction.axis not in (0,1,2):
         raise ValueError('Unsupported scripted response')
@@ -145,7 +161,10 @@ def respond(sim, instruction, *, callback=None, trace=None):
                 bounded=not np.isclose(end[instruction.axis]-start[instruction.axis], instruction.displacement))
 
 
-def observe_response(before, after, instruction):
+def observe_response(before, after, instruction, camera_position=None):
+    if instruction.action != 'translate':
+        from .actors import observed
+        return observed(before,after,instruction.action,camera_position)
     old = next((d for d in before if d.identity.object_id == instruction.object_id), None)
     new = next((d for d in after if d.identity.object_id == instruction.object_id), None)
     if old is None or new is None:

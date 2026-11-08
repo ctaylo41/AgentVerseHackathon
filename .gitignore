@@ -4,3 +4,5 @@ __pycache__/
 outputs/
 .DS_Store
 MUJOCO_LOG.TXT
+models/*.pt
+models/*.task

@@ -9,5 +9,9 @@ description = "Local MuJoCo cinematographer prototype"
 requires-python = ">=3.11,<3.12"
 dependencies = ["mujoco==3.3.7", "numpy==2.2.6", "opencv-python==4.12.0.88"]
 
+[project.optional-dependencies]
+yolo = ["ultralytics>=8.3,<9"]
+pose = ["mediapipe>=0.10.21,<0.11", "opencv-contrib-python==4.12.0.88"]
+
 [tool.setuptools.package-data]
 robopod = ["assets/*.xml", "assets/*.html", "assets/*.json"]

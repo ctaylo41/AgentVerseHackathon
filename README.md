@@ -1,513 +1,216 @@
 # Robopod — local AI cinematographer
 
-Milestones 1–7 are implemented: a furnished MuJoCo studio, synthetic person and synthesizer,
-actuated vertical rail plus pan/tilt/roll gimbal, native controls, and calibrated RGB,
-metric depth and geometry-ID segmentation captures, plus deterministic exploration
-and observed-surface coverage, fallback perception and sparse semantic mapping.
-Local Gemma shot-planning integration supplies validated objectives for execution.
-Geometric shot optimisation and actuator execution are implemented; cooperative
-teleprompter refinement is now available with `--refine`.
-No model downloads or cloud calls occur at runtime.
+A local macOS demo with a six-axis MuJoCo camera, deterministic scene exploration,
+segmentation-based semantic mapping, local Gemma planning, geometric optimisation
+and scripted subject cooperation. No cloud services or runtime model downloads.
 
-## Run on Apple Silicon (Python 3.11, macOS 14+ baseline)
+## Run
+
+Python 3.11 on Apple Silicon, with a logged-in macOS graphics session:
 
 ```sh
 python3.11 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e .
-python -m robopod capture
-mjpython -m robopod viewer
-```
-
-In the native viewer, expand the right-side **Control** panel to move the actuators.
-The separate RGB window shows the actual rig view: **S** saves a capture, **R** resets,
-**Q** exits. Keep that window focused for these keys. Native viewer mouse navigation
-only changes the inspection view; it does not teleport the rig camera.
-
-```sh
-python -m robopod capture --camera-height 1.8 --pan 0.15 --tilt -0.15 --roll 0.05
-python -m robopod capture --width 1280 --height 720 --fovy 55 --output outputs/wide
-python -m unittest discover -s tests -v
-```
-
-Angles are radians; positive tilt looks up, positive pan turns toward world -X.
-Height is metres. Out-of-range commands fail before updating controls. Position
-servos move the rig via physics; reset alone writes the home configuration. Physical
-limits are soft MuJoCo constraints, not a guarantee of zero transient overshoot.
-The vertical servo has a small gravity-dependent steady-state error; metadata always
-records measured positions. Camera FOV is configured per run, not a fifth actuator.
-
-Each capture writes `rgb.png`, `geometry.npz` and `metadata.json`. The NPZ contains
-`depth_m` (optical-axis depth), `segmentation` (object ID, object type), `intrinsics`
-and `world_from_camera`. Segmentation IDs identify geoms, not semantic instances;
-the metadata maps geoms to bodies for the future fallback perception module.
-Camera coordinates are OpenCV right/down/forward; world coordinates are Z-up.
-Use `p_world = T_world_camera @ [depth * inv(K) @ [u,v,1], 1]`.
-
-The room is intentionally primitive, so learned detectors may miss the person or
-product. MuJoCo geometry identities will provide a dependable semantic fallback.
-The person is currently a stationary mocap body, ready for scripted movement later.
-
-## macOS rendering
-
-Use `mjpython` for the passive native viewer (required by MuJoCo on macOS).
-The pinned renderer uses OpenGL, not Metal. Do not set Linux EGL/OSMesa backends.
-Offscreen capture uses `python` and still needs a working macOS graphics session.
-Rendering belongs to one thread; a future Gradio interface must send commands to
-that simulation owner rather than call the renderer from arbitrary web callbacks.
-
-See [architecture and dependency assessment](docs/architecture.md) for interfaces,
-compatibility references, data flow and milestone acceptance checks.
-
-## Verification on this Mac
-
-Python 3.11 arm64 installation, two physics/control tests, and a 640x480 RGB/depth/
-segmentation capture passed. The saved RGB was visually inspected. Interactive viewer
-controls have not yet been manually exercised. macOS emitted an `ARB_clip_control`
-warning: this driver uses reduced depth precision. Background pixels (`segmentation`
-ID -1) contain far-plane depths and must be excluded from reconstruction. The near/far
-settings are scaled by MuJoCo's model extent, not literal metre distances.
-
-For the exact tested transitive environment, install `requirements-lock.txt` before
-`pip install -e .`. A sandbox may block CoreGraphics; run captures from a normal
-local terminal in a logged-in desktop session.
-
-## Milestone 2 — deterministic exploration
-
-```sh
-source .venv/bin/activate
-python -m robopod explore
-# Optional explicit NEW directory and coverage settings:
-python -m robopod explore --output outputs/my-survey --voxel-size 0.1 --min-novelty 0.03
-```
-
-The default output is a new timestamped survey directory. Explicit output directories
-must not already exist, so earlier captures cannot be overwritten. Exploration starts
-from the simulator's home state and visits 18 interior poses: three heights, three
-pan angles, two tilts, zero roll, with serpentine pan ordering. All movement uses
-position actuators. No exploration step writes joint positions or teleports the camera.
-The capture/viewer pose flags do not configure the exploration grid.
-
-Each pose must remain near its target with low velocity for 0.2 simulated seconds
-before capture. Height tolerance is 4 cm to accommodate the current servo's gravity
-sag; angular tolerance is 0.015 radians and velocity threshold is 0.015 in each axis's
-SI units per second. A five-second simulated timeout prevents hangs. Use
-`--settle-timeout` to change it. Failed poses are recorded without saving observations;
-a run with settling failures exits nonzero. Physics runs faster than wall-clock time.
-
-Outputs:
-- `view_000/`, etc.: RGB PNG, compressed depth/segmentation/calibration NPZ and JSON
-  metadata. IDs correspond to candidate order, so skipped views leave gaps.
-- `manifest.json`: every candidate, target/measured joints, simulation timestamp,
-  settling errors, visible geom IDs, novelty, cumulative coverage and relative paths.
-  It is updated after every candidate and records failures/interruption status.
-- `coverage.npz`: sorted integer world-space voxel indices, voxel size in metres,
-  and observed geom IDs. Cell centres are `(voxel_indices + 0.5) * voxel_size_m`.
-- `contact_sheet.jpg`: labelled thumbnails of retained observations.
-
-Coverage is the union of **observed surface voxels**, not a percentage of the whole
-room or free-space occupancy. Every fourth pixel is back-projected through measured
-camera calibration. Background/non-geom pixels and invalid depths are excluded.
-The default cell size is 10 cm. A frame is redundant if fewer than 3% of its cells
-are new and it reveals no new sampled geom IDs. Redundant frames are evaluated and
-logged but not stored; coverage refers to stored observations only. Set
-`--min-novelty 0` to retain every nonempty settled candidate. These are geometric
-coverage measures, not semantic mapping or adaptive exploration (later milestones).
-Resolution, pixel stride and voxel size affect counts; compare runs with identical
-settings. Occluded surfaces remain unknown, and the fixed rail cannot see everywhere.
-
-Milestone 2 verification on this Mac: seven unit tests passed; two full 18-pose
-surveys produced identical manifests, RGB files and geometry arrays. Each retained
-12 views, skipped six redundant views and covered 9,895 surface cells at the default
-settings. Recomputing coverage from saved observations exactly matched coverage.npz.
-The contact sheet was visually inspected. Counts are scene/configuration specific.
-
-## Milestone 3 — fallback perception and semantic mapping
-
-Map any completed survey without rendering again or downloading models:
-
-```sh
-python -m robopod map --survey outputs/milestone2-survey
-# To rerun, choose a NEW output directory:
-python -m robopod map --survey outputs/milestone2-survey --output outputs/my-map
-```
-
-By default, mapping writes a new `semantic_map` directory inside the survey. Existing
-output directories are refused. This stage runs offline on the saved RGB, depth,
-segmentation and calibration. It does not need macOS graphics access.
-
-The fallback registry in `perception.py` supplies known simulation identities: presenter,
-synthesizer, desk, plant, floor, walls and art. It groups geoms belonging to one object
-before producing masks and bounding boxes. Only objects with valid visible depth are
-added. The rig and unconfigured names are excluded. Change the explicit registry for
-new scenes; names provide labels, never hidden positions or dimensions.
-
-Outputs:
-- `scene_map.json`: persistent IDs, categories, approximate world positions, partial
-  observed bounds, confidence/source, first/last seen times, seen-from view IDs,
-  last pixel boxes, pose proxies and calibrated viewpoints.
-- `object_surfaces.npz`: up to 2,048 surface points per object, keyed by object ID,
-  sparsified into 8 cm cells. All geometry comes from depth back-projection.
-- `map_topdown.png`: XY map preview of observed surfaces.
-- `view_*/detections.json`, `masks.npz`, `annotated.jpg`: per-view detections, binary
-  instance masks and visual overlays. Boxes use exclusive right/bottom coordinates.
-- `mapping_report.json`: processing status and visibility history by viewpoint.
-
-Repeated observations share stable scene-local IDs (`body:person`, `body:product`,
-etc.). Static objects accumulate observed bounds; movable presenter/product geometry
-uses the latest observation to avoid motion trails. Positions are partial surface
-bounding-box centres, not guaranteed physical centres. Do not treat these bounds as
-complete collision volumes. Starting a different scene/reset requires a new map.
-
-Visibility is `visible` when detected. Otherwise prior surface samples are projected
-into the current image: `out_of_view` when none project inside, `occluded` when all
-in-image samples have a nearer valid depth, and `not_observed` when ambiguous.
-These missing-object states refer to last-known geometry; a moving unseen subject
-could have moved elsewhere. They are estimates, not ground-truth hidden-state access.
-Old positions retain their `last_seen` timestamp. Current landmarks clear on absence.
-
-Human head/torso/arm markers are **visible-surface proxies**, not anatomical joints,
-shoulder estimates or a full MediaPipe skeleton. They are only emitted for observed
-parts. Identity confidence 1.0 means exact segmentation/registry association; it does
-not imply complete shape or reliable learned classification.
-
-### Optional learned perception
-
-No new dependencies are needed. `PerceptionPipeline(geoms, detector=None,
-pose_estimator=None)` independently accepts an object backend implementing
-`detect(rgb)` and a pose backend implementing `estimate(rgb)`. Both return lists of
-JSON-safe dictionaries. With `None`, nothing is imported or downloaded. Backend errors
-are recorded as warnings while segmentation still works. Supplemental learned output
-is saved separately; it cannot overwrite simulator IDs or create duplicate map objects.
-The same injection points are available on `map_survey`.
-
-Actual YOLO/MediaPipe adapters and model weights remain deferred; this milestone ships
-and tests the fallback plus optional extension interfaces, not learned-model inference.
-`SceneMap.update(detections, observation, view_id)` and `PerceptionPipeline.process`
-can also be used in a future live loop. The CLI currently replays saved survey views.
-
-## Milestone 4 — local Gemma shot planning
-
-Once you have installed Ollama, start it and download the explicit local model tag:
-
-```sh
-ollama pull gemma4:e2b
-# If the Ollama app is not already serving:
-ollama serve
-```
-
-In another terminal, from this repository:
-
-```sh
-source .venv/bin/activate
-python -m robopod plan \
-  --survey outputs/milestone2-survey \
-  --brief "I want to film a professional tech review. Show me and the product, then capture a close-up of the product while I explain it."
-```
-
-The scene map defaults to `SURVEY/semantic_map/scene_map.json`. Override it with
-`--scene-map PATH`. `--images 3` selects 1–4 representative images; `--timeout 180`
-sets the per-request timeout (maximum 600 seconds). `--output PATH` selects a NEW
-output directory; the default is a timestamped `plan-*` directory inside the survey.
-No graphics window is needed. No dependency installation is needed beyond M1.
-
-The planner uses only `http://127.0.0.1:11434` and `gemma4:e2b`; environment proxies
-and HTTP redirects are disabled. It checks that the local model is installed and
-advertises vision support. It does not download models, start services, or switch to
-cloud inference. An unavailable service/model produces an actionable error and no
-validated plan. Model quality/performance still needs verification with your install.
-
-Input preparation verifies survey/map camera metadata matches, chooses views by
-semantic coverage and target prominence with a small viewpoint-diversity preference,
-and encodes up to four JPEGs at a maximum 640-pixel side. Images are ordered and labelled
-by view ID in the prompt. The model sees a compact eight-object summary for the sample
-scene, partial geometry caveats, the brief and measured rig limits—not depth arrays,
-all survey frames or full sparse point clouds. Selection is deterministic and currently
-scene-based, not a learned interpretation of the brief.
-
-`planning.py` defines the strict schema and validates both structure and semantics:
-- Ordered 1–6 shot objectives; unique shot IDs; wide/medium/close-up/detail types.
-- Known targets with normalized centre and frame-height composition goals.
-- Perspective preference, required background object IDs and a supplied starting view.
-- Durations, concise instructions addressed to known people, and feasibility notes.
-- Measurable centre/scale errors, visible fraction, headroom and stable-hold criteria.
-
-All fields are required; extra fields (including motor commands), nonfinite numbers,
-unknown IDs, duplicate targets and invalid ranges are rejected. The hold interval
-cannot exceed the shot duration. Headroom applies to person targets only. Visibility
-fraction is a desired metric, not a claim that complete object shape is already known.
-The model receives the schema via Ollama's `format` field. One invalid response gets
-one corrective retry; transport errors are not automatically retried. Inference is
-occasional and outside the simulation control loop.
-
-Outputs:
-- `shot_plan.json`: written **only after validation succeeds**.
-- `context.json`: compact input and selected viewpoint references, without base64 images.
-- `shot_plan.schema.json`: exact contract sent to Ollama.
-- `response_1.txt` (and optionally `response_2.txt`): raw model JSON text for debugging.
-- `planning_report.json`: validation/errors, model digest/capabilities, source map hash
-  and selected image paths/hashes. Failure never creates a valid-looking fallback plan.
-
-Validation checks objective structure and references, not physical achievability or
-creative quality. Milestone 5 will optimise reachable poses and evaluate these goals;
-Milestone 4 never moves actuators. The fixed rail/FOV limitations are explicit in the
-prompt, and requested close-ups may require subject/product repositioning.
-
-Verification so far: 18 tests pass, including malformed output, semantic validation,
-one-retry repair, unavailable model/server, and request schema/image wiring. The actual
-survey selects three images and produces a compact context successfully. Live Gemma
-inference is intentionally pending your Ollama/model installation; simulated responses
-in tests are not represented as real Gemma output.
-
-API references: [Ollama chat](https://docs.ollama.com/api/chat),
-[structured output](https://docs.ollama.com/capabilities/structured-outputs),
-[Gemma 4 E2B](https://ollama.com/library/gemma4:e2b).
-
-The generation schema now constrains object/view references to the current scene and
-human-instruction subject IDs to known people. Product-handling instructions must be
-addressed to the presenter, not the product. With no people, human instructions must
-be empty. Repair errors identify the offending field and allowed person IDs. The
-saved schema is the exact scene-specific schema used for that request.
-
-## Milestone 5 — geometric optimisation and actuator execution
-
-Run a validated plan against its scene map (no Ollama calls):
-
-```sh
-python -m robopod execute \
-  --survey outputs/milestone2-survey \
-  --plan outputs/milestone2-survey/plan-20261107-154753-305722/shot_plan.json
-```
-
-Replace the plan path with your generated `shot_plan.json`. `--scene-map PATH` can
-replace `--survey`. Optional `--output NEW_DIRECTORY` controls output location;
-`--preview` opens an RGB preview of the executing rig (Q cancels). Preview renders
-selected motion frames; execution runs in simulation time, not real-time pacing.
-`--width`, `--height`, `--fovy` configure the execution camera; FOV is fixed throughout
-the run. This mode uses offscreen macOS rendering and can be run with normal `python`.
-
-A hand-authored diagnostic example (not Gemma output) is included:
-
-```sh
-python -m robopod execute --survey outputs/milestone2-survey \
-  --plan examples/actuator_demo_plan.json
-```
-
-The optimiser samples an interior height/pan/tilt/roll grid, then refines its best
-geometric candidate. It projects sparse observed surfaces using forward kinematics
-in private scratch data. This hypothetical search never writes the executing rig's
-joint positions. Scores include target position/scale, headroom, field-of-view
-coverage, required backgrounds, a soft perspective preference and movement cost.
-The current pose and the plan's preferred survey pose are also considered.
-
-Eight shortlisted poses are reached through smooth actuator trajectories in a
-separate probe simulator and evaluated with rendered RGB/depth/segmentation. These
-checks measure visible boxes and occlusion of reference surface points. The best
-measured pose is selected, preferring satisfied observed criteria; the current pose
-is retained if candidates do not improve it. The executing rig then reaches that
-configuration through position actuators. No execution step teleports the camera.
-
-The quintic actuator setpoints have bounded rates: 0.35 m/s vertical, 0.6 rad/s pan,
-0.5 rad/s tilt and 0.35 rad/s roll. These are command-rate limits, not guarantees on
-instantaneous physical velocity. Search margins leave 6 cm above the rail's lower
-limit and 3 cm/radians at other boundaries. Every physics step checks actual joint
-positions; violations stop the run. Settling permits existing servo gravity sag.
-Predicted sag uses the current measured actuator offset, not an LLM estimate.
-This is a four-axis rig implementation; extra axes need a search-policy extension.
-
-For each shot the controller records before/after captures, then samples the framing
-criteria at 10 Hz for the requested duration. Completion requires a consecutive
-sampled hold interval. The result is `satisfied_observed_criteria` or `needs_adjustment`.
-The latter includes subject/product repositioning suggestions, but does not perform
-human movement or claim that a finite search proves global infeasibility. Creative
-human instructions are retained in the report and not executed until Milestone 6.
-
-Important geometry limitation: complete object silhouettes are unavailable from the
-sparse map. `min_visible_fraction` is currently evaluated as a **visible reference
-surface sample fraction**, not true full-object projected area. Reports explicitly
-label this proxy. Movable-object references are refreshed from the initial camera
-observation; this milestone assumes the subject/product then remain stationary.
-Headroom uses the top of a detected person mask and requires a visible head proxy.
-Required background visibility needs at least 16 segmented pixels. Perspective is a
-soft preference, and shot type is descriptive; numeric criteria govern execution.
-
-Outputs:
-- `execution_report.json`: overall/per-shot status and before/after scores.
-- `trajectory.json`: measured joints and actuator commands along the executed motion
-  and holds (checks run every physics step; saved samples are less frequent).
-- `reference_surfaces.npz`, `validated_plan.json`: the actual reference geometry and
-  revalidated objectives used in the run.
-- `shot_000/result.json`, etc.: candidate scores, chosen commands, measured framing,
-  hold samples and repositioning requests.
-- `shot_000/before/`, `after/`: full calibrated captures.
-- `shot_000/comparison.jpg`: labelled before/after view.
-
-Input plans are revalidated before motion. If the plan's planning report includes a
-scene-map hash, it must match. Output directories cannot already exist. Exit codes:
-0 = all observed criteria satisfied; 2 = execution finished but some shots need
-adjustment; 1 = input, motion or I/O failure. No failed/unsatisfied shot is silently
-reported as a completed cinematic objective.
-
-Milestone 5 verification on this Mac: 23 tests pass. The two-shot diagnostic run
-satisfied the presenter framing for a two-second sampled hold (loss 1.506 → 0.309).
-The oversized product close-up improved but correctly requested moving the synthesizer
-closer. All 336 saved trajectory samples stayed within measured and commanded joint
-limits; runtime limit checks additionally ran every physics step. The existing Gemma
-plan improved from loss 3.738 → 3.037 and remained explicitly unsatisfied. Rendered
-before/after images were visually inspected. No human instructions were executed.
-
-## Milestone 6 — teleprompter and closed-loop cooperation
-
-Enable scripted subject responses and bounded refinement:
-
-```sh
-python -m robopod execute --survey outputs/milestone2-survey \
-  --plan examples/cooperative_demo_plan.json --refine --preview
-```
-
-Use your own validated plan with the same `--refine` flag. The cooperative example is
-hand-authored, not Gemma output: a presenter step, followed by a product shot requiring
-repositioning. `--max-adjustments 3` sets the shared per-shot creative/geometric action
-budget (0–6). Without `--refine`, execution retains the Milestone 5 camera-only path.
-
-Each shot first optimises the camera. The teleprompter then presents one supported
-creative instruction at a time; when framing is still wrong, geometric scale errors
-can generate a closer/farther request. The console labels the source, and `--preview`
-overlays the current instruction on the executing camera image. `teleprompter.json`
-provides an active instruction snapshot and final history for a future web interface.
-
-Supported scripted creative phrases (case-insensitive, optional final punctuation):
-- “Step to your left/right” or “Step slightly to your left/right”: 25 cm.
-- “Step closer to the camera” or “Step back”: 30 cm.
-- “Raise the product” or “Move the product higher”: 15 cm.
-
-Left/right is the presenter's left/right while facing the initial camera (world +X/-X).
-The actor does not currently turn or articulate joints. Other creative instructions,
-such as smiling, pointing or looking at a specific object, are displayed as requiring
-manual response and recorded as pending. They are never silently marked completed;
-pending creative actions prevent a shot from being reported fully satisfied. There
-is not yet a manual acknowledgement/control UI to resolve them within a run.
-
-The existing person and now the product are kinematic MuJoCo mocap bodies. A scripted
-response interpolates their positions smoothly over one simulated second within a
-bounded demo workspace. The product may appear carried/floating: walking, grasping,
-contact-safe human motion and hand articulation are not physically simulated. Camera
-movement continues exclusively through its actuators and per-step joint-limit checks.
-Mocap movement is explicitly labelled in reports and never confused with robot motion.
-
-Completion uses fresh segmentation and calibrated depth before/after movement:
-the requested object must be observed in both frames and its visible surface median
-must shift at least 5 cm in the requested world-axis direction (or 25% for requests
-under 20 cm). A script acknowledgement alone cannot complete an instruction. This is
-an observed-motion check, not a claim to infer true body pose behind occlusion.
-
-After each response, dynamic geometry is replaced from fresh observations, the local
-semantic map is updated, and camera optimisation is repeated using the changed scene.
-The probe simulator receives the current mocap scene, so it cannot score the original
-subject placement by mistake. Framing is remeasured; the final shot must still pass
-the sampled hold check. No language model runs inside this loop.
-
-Loop safeguards:
-- One active supported instruction, with a one-second simulation-time cooldown.
-- Repeated same-direction adjustments require observed prior completion; failed
-  requests and direction reversals are blocked for the rest of the shot.
-- Stop on missing response evidence, less than 0.01 framing-loss improvement after
-  a geometric adjustment, no supported correction, or the action budget.
-- Unresolved framing sets `model_replan_needed` in the report; it does not automatically
-  invoke Gemma or claim success. Geometric corrections currently handle scale only;
-  other unresolved framing errors remain explicit.
-
-Additional per-shot outputs:
-- `teleprompter.json`: instruction source, lifecycle, timestamps and completion evidence.
-- `refinement.json`: each response, before/after/camera metrics, stop reason and pending
-  creative requests. `result.json` includes this summary too.
-- `response_*/`, `refined_*/`: full calibrated captures after subject response and
-  subsequent camera correction.
-- `scene_map.json`, `object_surfaces.npz`, `map_topdown.png`: fresh local map from the
-  refinement observations, with dynamic geometry replaced rather than trailed.
-- `refined_reference_surfaces.npz`: geometry used for final framing evaluation.
-
-Verified on this Mac: 28 tests pass. The cooperative demo completed both shots; a
-creative presenter step and two geometric product responses were verified from depth.
-The product-shot framing loss improved from 0.918 to 0.191. A stricter 50%-height
-close-up improved through three responses but stopped at the budget as unsatisfied,
-confirming that bounded refinement does not manufacture completion.
-
-## Milestone 7 — Robopod Studio
-
-Start the local browser app:
-
-```sh
-source .venv/bin/activate
 python -m robopod app
 ```
 
-Open **http://127.0.0.1:8765** in your browser. Use `--port 8766` for another local
-port or `--output PATH` for a different run-output directory. Stop the app with Ctrl+C
-in its terminal. No additional packages, frontend build tools, CDN or hosting are used.
+Open http://127.0.0.1:8765. Explore, enter a brief, generate a plan and execute it.
+Gemma requires a separately installed Ollama service and local `gemma4:e2b` weights.
+The labelled cooperative demo requires no model. `--port 8766` selects another port.
+`mjpython -m robopod viewer` opens the native viewer on macOS.
 
-The interface includes:
-1. **Restart simulation** — interrupts the current workflow, restores the room/rig,
-   clears the in-memory survey/plan/results and keeps all saved runs.
-2. **Explore scene** — surveys the 18 poses with live camera/perception, joint readings,
-   coverage progress, a sparse top-down map and current object visibility.
-3. **Creative brief / Generate Gemma plan** — calls your local Ollama installation,
-   displays the validated shot sequence and expandable JSON, and surfaces errors.
-4. **Load cooperative demo instead** — loads the explicitly labelled hand-authored
-   two-shot example. It does not pretend to be Gemma output and needs no model server.
-5. **Execute with teleprompter** — runs the selected plan with scripted responses,
-   bounded refinement, live instructions and per-shot result summaries. A sequence
-   before/after comparison and local output path appear when execution finishes.
+## Studio controls
 
-Survey first, then plan, then execute. Busy controls are disabled to avoid conflicting
-commands. New surveys clear old plans; execution restores the surveyed original room
-before starting, so rerunning a plan does not reuse an already-moved product. The
-creative brief in the browser is not overwritten by status updates or restart.
+- **Pause / Resume:** freezes simulation time, including scripted responses and
+  camera search. The current take continues after resume.
+- **Stop take:** stops at a controller checkpoint, preserves the survey, plan,
+  completed shot results and partial sequence video. Execute starts a new take.
+- **Restart simulation:** stops the workflow and resets the session. Saved files remain.
+- **Perception overlays:** switches between annotated and clean live RGB.
+- Active shot highlighting, recorded time, centre/scale errors and their tolerances
+  update during filming. Results and per-shot comparisons appear immediately after
+  each shot, not only at sequence completion.
+- Download individual clean shot MP4s or the clean sequence MP4. Video is 10 fps,
+  silent, fixed resolution and includes recorded shot frames only. Search, recovery,
+  pause and between-shot transitions are excluded. A stopped take may be partial.
+  MPEG-4 Part 2 (`mp4v`) uses the installed OpenCV encoder; player support varies.
 
-The HTTP server binds only to **127.0.0.1**. Open that exact address (not `localhost`).
-The server reads copied snapshots/images; all MuJoCo physics/rendering runs on the
-main simulation-owner thread. Camera frames are throttled during motion, while probe
-searches run without changing the displayed executing camera. Robot motion and scripted
-responses are paced for watching; probe search can pause visible movement while it
-checks candidate compositions. Current camera images include perception overlays.
+## Motion and composition contract
 
-Local Gemma planning runs in a separate worker without access to simulation state.
-Restart invalidates its result immediately; an already-running Ollama HTTP request may
-finish in the background, but its stale plan is not adopted. Another Gemma request is
-blocked until the earlier request returns. No previous output directory is deleted.
+Six axes: height (Z), truck (X), dolly (Y), pan, tilt and roll. Translation units are
+metres; angular units are radians. FOV is fixed during a run; there is no optical zoom.
 
-The UI is a lightweight standard-library HTTP application, not a public server. Action
-requests require the local session token and same-origin/Host checks. It has no arbitrary
-file-serving or external-network endpoint. Do not expose it through a public tunnel.
-All artifacts remain under `outputs/studio/` by default. Supported scripted actions and
-remaining geometric limitations are unchanged from Milestone 6.
+Each new generated shot has:
 
-Milestone 7 automated verification: 33 tests pass, including workflow ordering, single-operation locking, local request checks, planner-worker publication and stale-result rejection.
+```json
+{
+  "motion": "truck_left",
+  "motion_parameters": {
+    "direction": "left",
+    "amplitude_m": 0.15,
+    "subject_lock": "body:person"
+  },
+  "horizon": "level"
+}
+```
 
-Browser verification: interrupted a survey with Restart, completed a fresh survey,
-loaded the labelled cooperative plan, and executed both shots to satisfied observed
-criteria with live camera/teleprompter updates and final comparisons. The Gemma worker
-path is covered by automated tests; this browser QA run used the cooperative plan.
+This fragment belongs inside a complete validated shot. Supported modes:
 
-Brief-aware planning now rejects generic one-shot responses to explicit multi-shot
-requests. For a presenter/product → close-up → wider presenter brief, generation
-requires at least three shots and validation checks a product close-up followed by
-a presenter shot. Rule-of-thirds requests constrain horizontal placement, and target
-boxes must fit vertically in frame. These are conservative checks for explicit English
-phrases, not a complete natural-language intent parser. The UI shows the source brief
-and distinguishes the hand-authored demo from a Gemma response. Unsupported continuous
-in-shot movement/optical zoom is reported rather than promised as executable motion.
+| Motion | Direction | Translation |
+|---|---|---|
+| static | none | amplitude 0 |
+| push_in / pull_back | forward / backward | +Y / −Y |
+| truck_left / truck_right | left / right | −X / +X |
+| pedestal_up / pedestal_down | up / down | +Z / −Z |
+| sweep | auto | controller chooses a feasible signed translation |
 
-Explicit multi-shot briefs are generated in smaller per-shot requests (each with its
-own required type and scene targets), then assembled and validated as a whole. The UI
-shows per-shot generation progress, plan title/version and its source brief. Generic
-one-shot outputs cannot replace an explicit three-shot sequence. Browser brief drafts
-are saved locally for subsequent reloads. You can reopen the app with an existing survey:
-`python -m robopod app --survey outputs/studio/YOUR-SURVEY-DIRECTORY`.
+During plan generation, Gemma selects the motion mode, amplitude and subject lock.
+The app derives the corresponding direction deterministically and saves the complete
+contract above. Imported plans still reject contradictory mode/direction combinations.
+Directions refer to rig/world axes, not screen space at an arbitrary pan angle.
+Moving amplitude is 0.02–1 m. The controller validates target IDs, directions, axis
+availability, travel and command speed. `subject_lock` selects a shot target for
+compensating pan/tilt, or `none` to keep orientation fixed. All target composition
+criteria still apply. Amplitude is never silently shortened to fit an obstacle or
+framing constraint; an infeasible request remains unsatisfied.
 
-Live verification of the brief-aware update: local Gemma produced three separately
-validated shots (presenter/product, synthesizer close-up, return to presenter), with
-thirds placement, using per-shot generation. The prior single-call three-shot attempt
-hit the output limit; per-shot requests succeeded. The test suite contains 37 passing
-tests. To restore a generated sequence on startup, add `--plan PATH/shot_plan.json`
-alongside `--survey`; the app displays its source brief and run identifier.
+Horizon is `level` by default, with a 0.01-radian measured roll tolerance. `dutch`
+requires explicit structured intent. Descriptive prose cannot override motor policy.
+Legacy plan JSON without motion fields remains readable: static/level is the default;
+legacy moving plans use a 0.15 m amplitude and lock their first target.
+
+Gemma first outlines multi-shot sequences, then expands individual shots. Subjects,
+shot count and order are not forced into a presenter/product template. Output is
+validated before execution; natural-language interpretation remains model-dependent.
+
+Scores always use the original requested target positions and sizes. No automatic
+relaxation of goals is counted as success. Unsupported human instructions stay pending.
+During filming, 0.3 s of sustained framing failure triggers camera recovery, at most
+twice per shot. Recovery time is not recorded. Success requires a satisfied final
+frame and terminal hold, plus requested camera movement and resolved human actions.
+
+## Physical path checks
+
+All modeled rig solids participate in contact with the environment. Intentional
+intersections between connected gimbal parts are excluded from self collision.
+Before motion, signed MuJoCo geom distances and a conservative joint-displacement
+bound certify continuous clearance along the interpolated joint path (2 mm minimum).
+This checks the whole modeled rig against obstacles, including paths whose endpoints
+are clear but whose middle crosses an object. It is independent of image visibility.
+Uncertified paths are rejected; there is no automatic obstacle-routing planner.
+
+Measured rig clearances and joint limits are checked each physics step. Position
+servos and soft contacts are a numerical simulation, not a hardware safety guarantee.
+The path certificate assumes the current scene snapshot; scripted scene changes are
+checked during stepping. It covers the MJCF solids, not unmodeled cables or mechanisms.
+
+## Artifact compatibility
+
+New captures, survey manifests and scene maps carry an artifact version, rig identifier,
+perception registry version and SHA-256 of the scene/robot XML. Planning, app restore
+and execution reject missing/mismatched identities with a request to explore again.
+Old artifacts remain available for inspection/offline mapping, but cannot silently
+supply stale rig capabilities to a new run. Plan reports additionally bind to the
+exact scene-map hash. After changing the robot/room, run a fresh survey and plan.
+
+## CLI workflows
+
+```sh
+python -m robopod capture --truck 0.2 --dolly 0.3 --camera-height 1.6
+python -m robopod explore --output outputs/my-survey
+python -m robopod map --survey outputs/my-survey
+python -m robopod plan --survey outputs/my-survey --brief "Show me and the synthesizer, then its controls."
+python -m robopod execute --survey outputs/my-survey --plan PATH/shot_plan.json --refine
+python -m robopod app --survey outputs/my-survey --plan PATH/shot_plan.json
+python -m unittest discover -s tests -v
+```
+
+Use a new output directory for each survey, map, plan or execution. `--preview` shows
+CLI execution; Q cancels. Exit 0 means observed criteria passed; exit 2 means shots
+need adjustment. Rendering tests require macOS graphics access; a sandbox can block it.
+
+Outputs include calibrated RGB/depth/segmentation, sparse surface maps, planning
+context/responses, immutable validated objectives, trajectory samples, per-shot metrics,
+path checks, refinement evidence, before/after comparisons and MP4 footage.
+
+## Prototype limits
+
+The map represents partial observed surfaces; visibility remains a sampled-surface proxy.
+Scripted actors and learned recognition have the limits described below. This is a local
+simulation demo, with fixed FOV and no physical grasp controller. See [architecture](docs/architecture.md).
+
+## Adaptive discovery and optional local perception
+
+Exploration starts with the reproducible 18-pose baseline, then ranks additional
+reachable viewpoints using observed object uncertainty, projected visibility and view
+diversity. It stops after two low-novelty observations or the configured budget (default
+6, maximum 12). `--adaptive-views 0` retains only the baseline. Decisions, blocked paths,
+coverage gains and calibrated captures remain in the manifest. It cannot promise to
+find an object that no camera view reveals.
+
+Unknown simulator bodies/geoms receive stable instance IDs and an `unknown` category.
+Optional YOLO segmentation labels associate by mask overlap to those IDs instead of
+creating duplicate objects. Configured demo identities remain authoritative. MediaPipe
+pose landmarks associate to visible person masks and back-project valid observed depth.
+Model errors retain the segmentation fallback and produce warnings. Recognition covers
+the chosen model's vocabulary; this is not open-world recognition of arbitrary products.
+
+Install only the extras you want, and download compatible weights separately:
+
+```sh
+python -m pip install -e '.[yolo]'
+python -m pip install -e '.[pose]'
+python -m robopod app --yolo-model /absolute/path/segmentation.pt --pose-model /absolute/path/pose_landmarker.task
+python -m robopod map --survey outputs/my-survey --yolo-model /absolute/path/segmentation.pt
+```
+
+The Studio settings panel accepts these local paths, the adaptive view budget and the
+replan budget. Applying settings resets the session and requires a fresh survey. Empty
+paths disable learned backends. Runtime never fetches weights. Model packages/weights
+are optional and inference quality on stylised MuJoCo imagery depends on the model.
+Adapter APIs: [Ultralytics segmentation](https://docs.ultralytics.com/tasks/segment/)
+and [MediaPipe PoseLandmarker](https://ai.google.dev/edge/api/mediapipe/python/mp/tasks/vision/PoseLandmarker).
+
+## Detail shots and expressive cooperation
+
+`body:product` remains the whole synthesizer. `part:product:controls` and
+`part:product:keys` have separate masks, sparse surfaces and framing/visibility criteria.
+A controls close-up must target the controls when that part has been observed.
+
+The demo presenter supports these exact phrases (case-insensitive, final punctuation optional):
+
+- `Turn your shoulders toward the camera` / `Turn toward the instrument`
+- `Look at the camera` / `Smile` / `Look at the camera and smile`
+- `Point to the controls` / `Point to the product`
+- `Hold the product near your face` / `Hold the product closer to your face`
+- Existing steps left/right/closer/back and product raise/lower/move phrases.
+
+These animate torso/head/arm orientation, visible mouth features and the held prop.
+They are scripted kinematic cooperation, not physically realistic grasping or human
+biomechanics. Verification uses visible facial/shoulder/hand landmarks and segmented
+depth: missing evidence remains unresolved. Unknown people are mapped but have no
+scripted actor; their instructions require manual response. There is no facial emotion
+classifier or eyeball tracking: smile and gaze are visible geometric proxies.
+
+## Bounded Gemma escalation
+
+CLI execution and Studio now consume failed-shot `model_replan_needed` flags. The
+default budget is one revised plan (`--replan-budget 0` disables, maximum 2). After a
+failed take, the owner thread captures a fresh image and updates visible object surfaces.
+Gemma receives the original brief, failed shots, measured framing/motion failures,
+pending human actions, current semantic map and physical limits. Only failed shots retry;
+previous successes remain in the aggregate report.
+
+The revision may change the preferred viewpoint, add cooperation instructions and explain
+feasibility. It cannot change targets, framing, tolerances, duration, motion or horizon,
+or drop original human instructions. Notes-only revisions are rejected because they do not change execution. Invalid/unavailable model responses stop escalation
+with unresolved results; no retry loop claims success by weakening the goal. Pause/stop
+remain responsive while the HTTP worker runs. A cancelled HTTP request can finish in
+its background thread, but cannot execute a stale result.
+
+Execution folders contain `attempt_0`, optional `replan_1` / `attempt_1`, and a root
+`execution_report.json` linking all attempts. Each attempt has its own sequence video;
+the UI's sequence download refers to the latest attempt, not an edited montage of retries.
+Starting a new take uses the original loaded plan. Learned inference is synchronous on
+the simulation owner thread; large optional models can reduce live preview responsiveness.

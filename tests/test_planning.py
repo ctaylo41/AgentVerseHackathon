@@ -13,7 +13,8 @@ SCENE = {'objects': {'body:person': {'category': 'person'}, 'body:product': {'ca
 
 def valid_plan():
     return dict(schema_version=1, title='Tech review', shots=[dict(
-        shot_id='shot_1', shot_type='medium', description='Presenter and synthesizer', duration_seconds=8,
+        shot_id='shot_1', shot_type='medium', motion='static', horizon='level',
+        motion_parameters=dict(amplitude_m=0.,direction='none',subject_lock='none'), description='Presenter and synthesizer', duration_seconds=8,
         targets=[dict(object_id='body:person', center_x=0.5, center_y=0.5, frame_height_fraction=0.65)],
         perspective='eye_level', background_object_ids=[], preferred_view_id='view_007',
         human_instructions=[dict(subject_id='body:person', instruction='Look at the camera.')],
@@ -26,7 +27,7 @@ class ValidationTests(unittest.TestCase):
     def test_valid_and_reject_bad_semantics(self):
         self.assertEqual(parse_plan(json.dumps(valid_plan()), SCENE, ['view_007']), valid_plan())
         for field, value in [('duration_seconds', True), ('duration_seconds', float('nan')),
-                             ('duration_seconds', -2), ('shot_type', 'orbit'),
+                             ('duration_seconds', -2), ('shot_type', 'orbit'), ('motion', 'orbit'), ('horizon', 'random'),
                              ('preferred_view_id', 'missing')]:
             plan = valid_plan()
             plan['shots'][0][field] = value
@@ -44,6 +45,12 @@ class ValidationTests(unittest.TestCase):
         for content in ['```json\n{}\n```', '{"title":"a","title":"b"}', 'not JSON']:
             with self.assertRaises(PlanValidationError):
                 parse_plan(content, SCENE, ['view_007'])
+
+    def test_legacy_plan_defaults_are_accepted(self):
+        plan = valid_plan()
+        plan['shots'][0].pop('motion')
+        plan['shots'][0].pop('horizon')
+        self.assertEqual(parse_plan(json.dumps(plan), SCENE, ['view_007']), plan)
 
     def test_duplicate_shots_rejected(self):
         plan = valid_plan()
@@ -63,7 +70,9 @@ class GenerationTests(unittest.TestCase):
             def chat(self, messages, *, schema=None):
                 assert schema['properties']['shots']['items']['properties']['human_instructions']['items']['properties']['subject_id']['enum'] == ['body:person']
                 self.calls.append(copy.deepcopy(messages))
-                return '{}' if len(self.calls) == 1 else json.dumps(valid_plan())
+                result=valid_plan()
+                result['shots'][0]['motion_parameters'].pop('direction')
+                return '{}' if len(self.calls) == 1 else json.dumps(result)
         client = Client()
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp)/'scene.json'; source.write_text('{}')
@@ -99,6 +108,9 @@ class GenerationTests(unittest.TestCase):
             self.assertFalse(body['stream'])
             self.assertEqual(body['format'], scene_plan_schema(SCENE, ['view_007']))
             self.assertEqual(body['messages'][0]['images'], ['abc'])
+            self.assertIn('exact output JSON schema', body['messages'][-1]['content'])
+            self.assertIn('human_instructions', body['messages'][-1]['content'])
+            self.assertIn('completion', body['messages'][-1]['content'])
         for response in [{'done': False}, {'done': True, 'done_reason': 'length'}, {'done': True, 'message': {}}]:
             with patch.object(client, '_request', return_value=response), self.assertRaises(PlannerError):
                 client.chat([])

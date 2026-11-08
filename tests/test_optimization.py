@@ -76,19 +76,38 @@ class OptimizationTests(unittest.TestCase):
                             'body:product': {'category': 'instrument', 'label': 'Synthesizer'}},
                 'viewpoints': {'v0': {'joints': sim.configuration}}
             }
-            s = dict(shot_id='s1', description='Rule of thirds medium shot with camera motion',
+            s = dict(shot_id='s1', motion='sweep', description='Rule of thirds medium shot with camera motion',
                      duration_seconds=2.0, preferred_view_id='v0',
                      targets=[dict(object_id='body:person', center_x=0.333, center_y=0.5, frame_height_fraction=0.6)],
                      completion=dict(max_center_error=0.12, max_scale_error=0.12, min_visible_fraction=0.6,
                                      headroom_fraction=0.2, headroom_tolerance=0.15, hold_seconds=0.5),
                      background_object_ids=[], perspective='neutral')
+            move_to(sim, dict(height=1.4, pan=0, tilt=0, roll=.2))
+            s['description'] = 'No Dutch angle; use smooth camera motion'
             search = optimize(sim, probe, s, scene, surfaces, shortlist=4)
+            self.assertIn('horizon: roll exceeds level tolerance', search['before']['failures'])
             self.assertAlmostEqual(search['target']['roll'], 0.0)
             for candidate in search['rendered_candidates']:
                 self.assertAlmostEqual(candidate['target']['roll'], 0.0)
             move_to(sim, search['target'])
+            measured_obs = sim.capture()
+            def belongs_to_person(geom):
+                body = int(sim.model.geom_bodyid[geom])
+                while body:
+                    if sim.model.body(body).name == 'person': return True
+                    body = int(sim.model.body_parentid[body])
+                return False
+            ids = [i for i in range(sim.model.ngeom) if belongs_to_person(i)]
+            ys,xs = np.nonzero(np.isin(measured_obs.segmentation[:,:,0],ids))
+            direct_height = (ys.max()+1-ys.min())/sim.height
+            direct_cx = (xs.max()+1+xs.min())/2/sim.width
+            raw_score = evaluate(s,scene,surfaces,measured_obs,perception.detect(measured_obs),perception.registry)
+            self.assertAlmostEqual(raw_score['targets']['body:person']['scale_error'],abs(direct_height-.6))
+            self.assertAlmostEqual(raw_score['targets']['body:person']['framing']['center_x'],direct_cx)
             sweep = plan_sweep(sim, s, scene, surfaces)
             self.assertTrue(sweep['continuous'])
+            translation = np.array([sweep['end'][n]-sweep['start'][n] for n in ('truck','dolly','height')])
+            self.assertAlmostEqual(float(np.linalg.norm(translation)),.15,places=6)
             self.assertAlmostEqual(sweep['end']['roll'], 0.0)
             trace = []
             step_sweep(sim, sweep['start'], sweep['end'], 0.0, 2.0, 2.0, trace=trace)
@@ -123,12 +142,13 @@ class OptimizationTests(unittest.TestCase):
             search1 = optimize(sim, probe, closeup, scene, surfaces)
             self.assertGreater(search1['target']['height'], 0.95)
             self.assertGreater(search1['target']['dolly'], 1.0)
-            self.assertTrue(search1['predicted_after']['satisfies_observed_criteria'])
+            self.assertAlmostEqual(search1['predicted_after']['targets']['body:product']['scale_error'],
+                                   abs(search1['predicted_after']['targets']['body:product']['framing']['frame_height_fraction'] - .2))
             move_to(sim, search1['target'])
             s1_dir = Path(tmp)/'s1'
             s1_dir.mkdir()
             ref1 = refine_shot(sim, probe, closeup, scene, surfaces, perception, s1_dir, progress=None)
-            self.assertTrue(ref1['after']['satisfies_observed_criteria'])
+            self.assertEqual(ref1['model_replan_needed'], not ref1['after']['satisfies_observed_criteria'])
             np.testing.assert_allclose(
                 sim.data.mocap_pos[int(sim.model.body('product').mocapid[0])], initial_product_pos
             )
@@ -155,13 +175,15 @@ class OptimizationTests(unittest.TestCase):
             s2_dir = Path(tmp)/'s2'
             s2_dir.mkdir()
             ref2 = refine_shot(sim, probe, medium, scene, surfaces, perception, s2_dir, progress=None)
-            self.assertEqual(ref2['pending_creative'], [])
-            self.assertTrue(ref2['after']['satisfies_observed_criteria'])
+            self.assertEqual(len(ref2['pending_creative']), 1)
+            self.assertTrue(ref2['model_replan_needed'])
+            self.assertAlmostEqual(ref2['after']['targets']['body:person']['scale_error'],
+                                   abs(ref2['after']['targets']['body:person']['framing']['frame_height_fraction'] - .45))
             np.testing.assert_allclose(
                 sim.data.mocap_pos[int(sim.model.body('product').mocapid[0])], initial_product_pos
             )
             sweep2 = plan_sweep(sim, medium, scene, surfaces)
-            self.assertTrue(sweep2['continuous'])
+            self.assertFalse(sweep2['continuous'])  # Legacy plans default to a static shot.
 
             # Verify generality on a relocated scene layout (non-default presenter and prop 3D positions).
             sim.reset()
@@ -175,7 +197,8 @@ class OptimizationTests(unittest.TestCase):
             closeup_reloc = copy.deepcopy(closeup)
             closeup_reloc['targets'][0]['center_x'] = 0.666667
             search_reloc = optimize(sim, probe, closeup_reloc, scene, surf_reloc)
-            self.assertTrue(search_reloc['predicted_after']['satisfies_observed_criteria'])
+            self.assertAlmostEqual(search_reloc['predicted_after']['targets']['body:product']['scale_error'],
+                                   abs(search_reloc['predicted_after']['targets']['body:product']['framing']['frame_height_fraction'] - .2))
 
 
 

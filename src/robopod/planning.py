@@ -55,6 +55,16 @@ SHOT_PLAN_SCHEMA = obj({
 })
 
 
+# Older saved plans remain valid, with static motion and a level horizon by default.
+_shot_schema = SHOT_PLAN_SCHEMA['properties']['shots']['items']
+_shot_schema['properties'].update(
+    motion=dict(type='string', enum=['static', 'sweep', 'push_in', 'pull_back', 'truck_left', 'truck_right', 'pedestal_up', 'pedestal_down']),
+    horizon=dict(type='string', enum=['level', 'dutch']),
+    motion_parameters=obj({'amplitude_m': number(0,1),
+                           'direction': dict(type='string', enum=['none','auto','forward','backward','left','right','up','down']),
+                           'subject_lock': text(100)}),
+)
+
 
 def scene_plan_schema(scene, allowed_views):
     """Constrain decoding to actual scene IDs, without mutating the base contract."""
@@ -65,6 +75,7 @@ def scene_plan_schema(scene, allowed_views):
     if not object_ids or not allowed_views:
         raise ValueError('Planning requires observed objects and representative views')
     shot['targets']['items']['properties']['object_id']['enum'] = object_ids
+    shot['motion_parameters']['properties']['subject_lock']['enum'] = ['none'] + object_ids
     shot['background_object_ids']['items']['enum'] = object_ids
     shot['preferred_view_id']['enum'] = sorted(set(allowed_views))
     if people:
@@ -86,10 +97,10 @@ def _validate(value, schema, path='$'):
     if 'enum' in schema and value not in schema['enum']:
         raise PlanValidationError(f'{path}: must be one of {schema["enum"]}')
     if kind == 'object':
-        if set(value) != set(schema['properties']):
+        if not set(schema['required']) <= set(value) or not set(value) <= set(schema['properties']):
             raise PlanValidationError(f'{path}: fields must be exactly {list(schema["properties"])}')
-        for key, child in schema['properties'].items():
-            _validate(value[key], child, f'{path}.{key}')
+        for key in value:
+            _validate(value[key], schema['properties'][key], f'{path}.{key}')
     elif kind == 'array':
         if not schema['minItems'] <= len(value) <= schema['maxItems']:
             raise PlanValidationError(f'{path}: invalid item count')
@@ -102,7 +113,7 @@ def _validate(value, schema, path='$'):
         raise PlanValidationError(f'{path}: outside [{schema["minimum"]}, {schema["maximum"]}]')
 
 
-def parse_plan(content, scene, allowed_views):
+def decode_json(content):
     def pairs(items):
         result = {}
         for key, value in items:
@@ -115,9 +126,16 @@ def parse_plan(content, scene, allowed_views):
                           parse_constant=lambda value: (_ for _ in ()).throw(PlanValidationError(f'Invalid number: {value}')))
     except (json.JSONDecodeError, TypeError, RecursionError) as error:
         raise PlanValidationError(f'Expected one JSON object: {error}') from error
+    return plan
+
+
+def parse_plan(content, scene, allowed_views):
+    plan = decode_json(content)
     _validate(plan, SHOT_PLAN_SCHEMA)
     seen = set()
     for shot in plan['shots']:
+        from .motion import validate
+        validate(shot)
         if shot['shot_id'] in seen:
             raise PlanValidationError('Shot IDs must be unique')
         seen.add(shot['shot_id'])

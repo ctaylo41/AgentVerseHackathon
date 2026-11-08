@@ -10,9 +10,7 @@ from .perception import SegmentationPerception
 
 
 def geometry_catalog(sim):
-    return {str(i): dict(name=sim.model.geom(i).name,
-                        body=sim.model.body(int(sim.model.geom_bodyid[i])).name)
-            for i in range(sim.model.ngeom)}
+    return sim.geometry_catalog()
 
 
 def project(points, transform, intrinsics):
@@ -32,73 +30,6 @@ def framing(uv, width, height):
     return dict(center_x=float((low[0]+high[0])/2/width),
                 center_y=float((low[1]+high[1])/2/height),
                 frame_height_fraction=float((high[1]-low[1])/height))
-
-
-def _effective_target(target, shot, scene, surfaces, box, obs=None, proj_box=None):
-    """Adapt over-constrained targets to the physical 3D geometry and camera optics of any scene."""
-    key = target['object_id']
-    pts = surfaces.get(key)
-    if pts is None or not len(pts) or obs is None:
-        return target
-    span_z = float(pts[:, 2].max() - pts[:, 2].min())
-    if span_z < 0.01:
-        return target
-    width, height = obs.rgb.shape[1], obs.rgb.shape[0]
-    if proj_box is None:
-        uv, _ = project(surfaces[key], obs.world_from_camera, obs.intrinsics)
-        proj_box = framing(uv, width, height)
-    if proj_box is None:
-        return target
-    adjusted = dict(target)
-    # Identify the largest target in the shot by 3D bounding-box diagonal.
-    primary = max(
-        shot['targets'],
-        key=lambda t: (
-            float(np.linalg.norm(surfaces[t['object_id']].max(axis=0) - surfaces[t['object_id']].min(axis=0)))
-            if t['object_id'] in surfaces and len(surfaces[t['object_id']]) else 0.0
-        ),
-    )
-    if key != primary['object_id'] and primary['object_id'] in surfaces:
-        p_pts = surfaces[primary['object_id']]
-        p_span_z = float(p_pts[:, 2].max() - p_pts[:, 2].min())
-        uv_p, _ = project(p_pts, obs.world_from_camera, obs.intrinsics)
-        proj_p = framing(uv_p, width, height)
-        if proj_p is not None and p_span_z > 1.8 * span_z:
-            # In a multi-target shot, camera distance and orientation are governed by the larger primary
-            # subject; adapt the smaller co-target's expected scale and relative 2D offset via 3D projection.
-            if adjusted['frame_height_fraction'] > 1.3 * proj_box['frame_height_fraction']:
-                if box is not None and abs(box['frame_height_fraction'] - proj_box['frame_height_fraction']) <= 0.06:
-                    adjusted['frame_height_fraction'] = float(box['frame_height_fraction'])
-                else:
-                    adjusted['frame_height_fraction'] = float(proj_box['frame_height_fraction'])
-            du = proj_box['center_x'] - proj_p['center_x']
-            dv = proj_box['center_y'] - proj_p['center_y']
-            coupled_x = float(np.clip(primary['center_x'] + du, 0.05, 0.95))
-            coupled_y = float(np.clip(primary['center_y'] + dv, 0.05, 0.95))
-            if abs(adjusted['center_x'] - primary['center_x']) < 0.05:
-                adjusted['center_x'] = coupled_x
-            if abs(adjusted['center_y'] - primary['center_y']) < 0.08:
-                adjusted['center_y'] = coupled_y
-            return adjusted
-
-    # For a primary or single target on a fixed-FOV lens, adapt scale when the camera is at the
-    # physical boundary of its workspace and cannot zoom in or out further.
-    proj_h = float(proj_box['frame_height_fraction'])
-    shot_type = shot.get('shot_type')
-    if (shot_type in ('medium', 'wide') or len(shot.get('targets', [])) > 1) and span_z > 1.0:
-        if 0.55 * proj_h <= adjusted['frame_height_fraction'] < proj_h:
-            if box is not None and abs(box['frame_height_fraction'] - proj_h) <= 0.08:
-                adjusted['frame_height_fraction'] = float(box['frame_height_fraction'])
-            else:
-                adjusted['frame_height_fraction'] = proj_h
-    elif shot_type in ('close_up', 'detail') or 'as close' in shot.get('description', '').lower():
-        if proj_h < adjusted['frame_height_fraction'] <= 1.75 * proj_h:
-            is_forward = float(obs.world_from_camera[1, 3]) > -1.35
-            if is_forward and box is not None and abs(box['frame_height_fraction'] - proj_h) <= 0.06:
-                adjusted['frame_height_fraction'] = float(box['frame_height_fraction'])
-            elif is_forward:
-                adjusted['frame_height_fraction'] = proj_h
-    return adjusted
 
 
 def evaluate(shot, scene, surfaces, obs, detections=None, registry=None):
@@ -126,7 +57,7 @@ def evaluate(shot, scene, surfaces, obs, detections=None, registry=None):
                 same = np.zeros(depth.shape, dtype=bool)
                 for geom_id in np.unique(patch[:, :, 0]):
                     identity = registry.get(int(geom_id))
-                    if identity is not None and identity.object_id == key:
+                    if identity is not None and (identity.object_id == key or key in identity.detail_ids):
                         same |= (patch[:, :, 0] == geom_id) & (patch[:, :, 1] == int(mujoco.mjtObj.mjOBJ_GEOM))
                 visible[idx] = np.any(same & np.isfinite(depth) & (np.abs(depth-z[idx]) < 0.12))
             detection = detected.get(key)
@@ -139,7 +70,7 @@ def evaluate(shot, scene, surfaces, obs, detections=None, registry=None):
                 # Top of person mask is a headroom approximation; require observed head proxy.
                 if 'head' in detection.landmarks:
                     headroom = y1/height
-        target = _effective_target(raw_target, shot, scene, surfaces, box, obs, proj_box=proj_box)
+        target = raw_target  # Score the validated objective without moving the goalposts.
         fraction = float(visible.mean())
         center_error = math.hypot(box['center_x']-target['center_x'], box['center_y']-target['center_y']) if box else 2.0
         scale_error = abs(box['frame_height_fraction']-target['frame_height_fraction']) if box else 1.0
@@ -171,8 +102,11 @@ def evaluate(shot, scene, surfaces, obs, detections=None, registry=None):
     delta = float(obs.world_from_camera[2,3]-target_z)
     perspective_loss = {'neutral': 0.0, 'eye_level': abs(delta)*0.1,
                         'high_angle': max(0., -delta)*0.2, 'low_angle': max(0., delta)*0.2}[shot['perspective']]
-    allow_dutch = 'dutch' in shot.get('description', '').lower()
-    roll_loss = 0.0 if allow_dutch else abs(float(obs.joints.get('roll', 0.0))) * 0.5
+    allow_dutch = shot.get('horizon', 'level') == 'dutch'
+    roll_error = abs(float(obs.joints.get('roll', 0.0)))
+    if not allow_dutch and roll_error > 0.01:
+        reasons.append('horizon: roll exceeds level tolerance')
+    roll_loss = 0.0 if allow_dutch else roll_error * 0.5
     return dict(loss=float(loss+perspective_loss+roll_loss), targets=metrics, backgrounds=backgrounds,
                 satisfies_observed_criteria=not reasons, failures=reasons,
                 visibility_metric='fraction of reference surface samples; incomplete-geometry proxy')
@@ -231,7 +165,7 @@ def _ray_occlusion_penalty(sim, scratch, perception, cam_pos, cam_forward, targe
                 ident = perception.registry.get(int(geomid[0]))
                 if ident is None:
                     penalty += 8.0
-                elif ident.object_id != key:
+                elif ident.object_id != key and key not in ident.detail_ids:
                     penalty += 1.5
     return penalty
 
@@ -243,13 +177,15 @@ def optimize(sim, probe, shot, scene, surfaces, *, shortlist=8, progress=None):
     simulator, and ranked using actual rendered segmentation/depth and framing.
     """
     from .simulation import Observation
+    if shortlist < 1:
+        raise ValueError('At least one rendered candidate is required')
     reference = sim.capture()
     perception = SegmentationPerception(geometry_catalog(sim))
     baseline = evaluate(shot, scene, surfaces, reference, perception.detect(reference), perception.registry)
     limits = safe_limits(sim)
     axes = sim.axes
     current = {name: float(sim.data.ctrl[sim.model.actuator(name).id]) for name in axes}
-    allow_dutch = 'dutch' in shot.get('description', '').lower()
+    allow_dutch = shot.get('horizon', 'level') == 'dutch'
     scratch = mujoco.MjData(sim.model)
     scratch.mocap_pos[:] = sim.data.mocap_pos
     scratch.mocap_quat[:] = sim.data.mocap_quat
@@ -272,6 +208,7 @@ def optimize(sim, probe, shot, scene, surfaces, *, shortlist=8, progress=None):
     is_closeup_shot = shot.get('shot_type') in ('close_up', 'detail') or 'as close' in shot.get('description', '').lower()
 
     def rank(target):
+        sim.checkpoint()
         target = {name: float(np.clip(target.get(name, current.get(name, 0.0)), *limits[name])) for name in axes}
         if not allow_dutch and 'roll' in target:
             target['roll'] = 0.0
@@ -310,14 +247,14 @@ def optimize(sim, probe, shot, scene, surfaces, *, shortlist=8, progress=None):
     for values in product(heights_grid, np.linspace(*limits['pan'], 7),
                           np.linspace(*limits['tilt'], 7), rolls):
         rank(dict(zip(('height', 'pan', 'tilt', 'roll'), values), truck=0.0, dolly=max(0.0, min_safe_dolly)))
+    fovy_rad = math.radians(float(sim.model.cam_fovy[sim.camera_id]))
+    fovx_rad = 2 * math.atan(math.tan(fovy_rad / 2) * (sim.width / sim.height))
+    tan_half_y = math.tan(fovy_rad / 2)
+    tan_half_x = math.tan(fovx_rad / 2)
     if {'truck', 'dolly'} <= set(axes) and shot['targets']:
-        fovy_rad = math.radians(float(sim.model.cam_fovy[sim.camera_id]))
-        fovx_rad = 2 * math.atan(math.tan(fovy_rad / 2) * (sim.width / sim.height))
-        tan_half_y = math.tan(fovy_rad / 2)
-        tan_half_x = math.tan(fovx_rad / 2)
         aim_targets = list(shot['targets'])
         for raw_aim in aim_targets:
-            aim = _effective_target(raw_aim, shot, scene, surfaces, None, reference)
+            aim = raw_aim
             pts = surfaces[aim['object_id']]
             center = 0.5 * (pts.min(axis=0) + pts.max(axis=0))
             span_z = max(0.12, float(pts[:, 2].max() - pts[:, 2].min()))
@@ -355,13 +292,25 @@ def optimize(sim, probe, shot, scene, surfaces, *, shortlist=8, progress=None):
                 rank(dict(best, truck=best['truck']+d_truck, dolly=max(min_safe_dolly, best['dolly']+d_dolly),
                           pan=best['pan']+dp, tilt=best['tilt']+dt, roll=0.0))
     candidates = sorted(ranked.values(), key=lambda item: item[0])[:shortlist]
+    probe.model.body_quat[:] = sim.model.body_quat
+    probe.model.geom_pos[:] = sim.model.geom_pos
     probe.data.mocap_pos[:] = sim.data.mocap_pos
     probe.data.mocap_quat[:] = sim.data.mocap_quat
     best_target, best_score = current, baseline
     best_objective = (not baseline['satisfies_observed_criteria'], baseline['loss'] + (0.45 if is_closeup_shot else 0.0))
+    if not allow_dutch and (abs(current['roll']) > 1e-8 or abs(reference.joints['roll']) > 0.01):
+        best_objective = (True, float('inf'))
     checked = []
-    for index, (predicted, target) in enumerate(candidates):
-        move_to(probe, target)
+
+    def check_rendered(target, predicted):
+        nonlocal best_target, best_score, best_objective
+        from .safety import PathBlocked
+        try:
+            sim.path_validator.validate(sim.configuration, target)
+            move_to(probe, target)
+        except PathBlocked as error:
+            checked.append(dict(target=target, rejected_path=str(error)))
+            return None, None
         obs = probe.capture()
         result = evaluate(shot, scene, surfaces, obs, perception.detect(obs), perception.registry)
         travel = sum(abs(target[n]-current[n])/(limits[n][1]-limits[n][0]) for n in axes)
@@ -374,19 +323,73 @@ def optimize(sim, probe, shot, scene, surfaces, *, shortlist=8, progress=None):
         # Never choose a prettier prediction over a better measured initial view.
         if objective < best_objective:
             best_target, best_score, best_objective = target, result, objective
+        return obs, result
+
+    for index, (predicted, target) in enumerate(candidates):
+        check_rendered(target, predicted)
         if progress:
             progress(f"{shot['shot_id']}: checked candidate {index+1}/{len(candidates)}")
+
+    # Closed-loop pan/tilt servo correction in probe to eliminate residual framing offset
+    # between sparse surface sample projection and the full rendered segmentation mask bbox.
+    if shot['targets']:
+        primary_spec = max(
+            shot['targets'],
+            key=lambda t: (
+                float(np.linalg.norm(surfaces[t['object_id']].max(axis=0) - surfaces[t['object_id']].min(axis=0)))
+                if t['object_id'] in surfaces and len(surfaces[t['object_id']]) else 0.0
+            ),
+        )
+        m_box = best_score['targets'].get(primary_spec['object_id'], {}).get('framing')
+        if m_box is not None and (
+            abs(m_box['center_x'] - primary_spec['center_x']) > 0.002
+            or abs(m_box['center_y'] - primary_spec['center_y']) > 0.002
+        ):
+            d_pan = math.atan((primary_spec['center_x'] - m_box['center_x']) * 2.0 * tan_half_x)
+            d_tilt = math.atan((primary_spec['center_y'] - m_box['center_y']) * 2.0 * tan_half_y)
+            refined = dict(
+                best_target,
+                pan=float(np.clip(best_target['pan'] + d_pan, *limits['pan'])),
+                tilt=float(np.clip(best_target['tilt'] + d_tilt, *limits['tilt'])),
+            )
+            if not allow_dutch and 'roll' in refined:
+                refined['roll'] = 0.0
+            check_rendered(refined, best_score['loss'])
+
+    if not allow_dutch and abs(best_target['roll']) > 1e-8:
+        from .safety import PathBlocked
+        raise PathBlocked('No collision-free level-horizon candidate is reachable')
     return dict(target=best_target, before=baseline, predicted_after=best_score,
                 geometric_candidates=len(ranked), rendered_candidates=checked)
+
+
+def motion_matches(start, end, motion):
+    """Named translations have explicit rig-coordinate directions; sweep is free-form."""
+    directions = {'push_in': ('dolly', 1), 'pull_back': ('dolly', -1),
+                  'truck_right': ('truck', 1), 'truck_left': ('truck', -1),
+                  'pedestal_up': ('height', 1), 'pedestal_down': ('height', -1)}
+    if motion not in directions:
+        return motion == 'sweep'
+    axis, sign = directions[motion]
+    return axis in start and sign * (end[axis]-start[axis]) >= .015
 
 
 def plan_sweep(sim, shot, scene, surfaces):
     """Select a smooth, framing-preserving continuous camera sweep across the shot duration."""
     from .control import RATES
     from .simulation import Observation
+    from .motion import validate as validate_motion
+    contract = validate_motion(shot, sim.limits)
+    start = {name: float(sim.data.ctrl[sim.model.actuator(name).id]) for name in sim.axes}
+    if shot.get('motion', 'static') == 'static':
+        return dict(start=start, end=dict(start), displacement={n: 0.0 for n in start},
+                    continuous=False, reason='static_requested')
     reference = sim.capture()
     perception = SegmentationPerception(geometry_catalog(sim))
     measured_start = evaluate(shot, scene, surfaces, reference, perception.detect(reference), perception.registry)
+    if not measured_start['satisfies_observed_criteria']:
+        return dict(start=start, end=dict(start), displacement={n: 0.0 for n in start},
+                    continuous=False, reason='starting_composition_unsatisfied')
     limits = safe_limits(sim)
     axes = sim.axes
     start = {name: float(sim.data.ctrl[sim.model.actuator(name).id]) for name in axes}
@@ -404,8 +407,10 @@ def plan_sweep(sim, shot, scene, surfaces):
                          surfaces[t['object_id']][surfaces[t['object_id']][:, 2].argmax()]]
         for t in shot['targets']
     }
+    criteria = shot['completion']
+    framing_bias = {}
 
-    def eval_pose(pose):
+    def raw_eval_pose(pose):
         for name, value in pose.items():
             scratch.joint(name).qpos[0] = value - sag[name]
         mujoco.mj_forward(sim.model, scratch)
@@ -416,25 +421,78 @@ def plan_sweep(sim, shot, scene, surfaces):
                           transform, float(scratch.time), pose)
         res = evaluate(shot, scene, surfaces, obs)
         occ = _ray_occlusion_penalty(sim, scratch, perception, transform[:3, 3], transform[:3, 2], target_sample_points)
+        res['occlusion_clear'] = occ == 0
         if occ > 0:
             res['loss'] += occ
             res['satisfies_observed_criteria'] = False
+        return res, obs
+
+    raw_start, _ = raw_eval_pose(start)
+    for raw_t in shot['targets']:
+        key = raw_t['object_id']
+        m_t = measured_start['targets'].get(key, {})
+        p_t = raw_start['targets'].get(key, {})
+        if m_t.get('framing') is not None and p_t.get('framing') is not None:
+            framing_bias[key] = (
+                m_t['framing']['center_x'] - p_t['framing']['center_x'],
+                m_t['framing']['center_y'] - p_t['framing']['center_y'],
+                m_t['framing']['frame_height_fraction'] - p_t['framing']['frame_height_fraction'],
+                m_t['headroom_error'] - p_t['headroom_error'],
+            )
+
+    def eval_pose(pose):
+        res, obs = raw_eval_pose(pose)
+        if not framing_bias:
+            return res
+        reasons = [r for r in res['failures'] if r.endswith('background missing') or r.endswith('visibility') or r.startswith('horizon:')]
+        occluded = not res['occlusion_clear']
+        loss_delta = 0.0
+        for raw_t in shot['targets']:
+            key = raw_t['object_id']
+            if key not in framing_bias or res['targets'][key]['framing'] is None:
+                continue
+            bx, by, bh, bhead = framing_bias[key]
+            p_box = res['targets'][key]['framing']
+            cal_box = dict(
+                center_x=p_box['center_x'] + bx,
+                center_y=p_box['center_y'] + by,
+                frame_height_fraction=p_box['frame_height_fraction'] + bh,
+            )
+            eff_t = raw_t
+            old_m = res['targets'][key]
+            c_err = math.hypot(cal_box['center_x'] - eff_t['center_x'], cal_box['center_y'] - eff_t['center_y'])
+            s_err = abs(cal_box['frame_height_fraction'] - eff_t['frame_height_fraction'])
+            h_err = max(0.0, old_m['headroom_error'] + bhead) if scene['objects'][key]['category'] == 'person' else 0.0
+            loss_delta += (4 * (c_err - old_m['center_error'])
+                           + 3 * (s_err - old_m['scale_error'])
+                           + 2 * (h_err - old_m['headroom_error']))
+            res['targets'][key].update(framing=cal_box, center_error=c_err, scale_error=s_err, headroom_error=h_err)
+            if c_err > criteria['max_center_error']:
+                reasons.append(f'{key}: position')
+            if s_err > criteria['max_scale_error']:
+                reasons.append(f'{key}: scale')
+            if h_err > criteria['headroom_tolerance']:
+                reasons.append(f'{key}: headroom')
+        res['loss'] = float(max(0.0, res['loss'] + loss_delta))
+        res['failures'] = reasons
+        res['satisfies_observed_criteria'] = not reasons and not occluded
         return res
 
     start_eval = eval_pose(start)
-    criteria = shot['completion']
     tight_margin = any(
         m['scale_error'] > 0.70 * criteria['max_scale_error'] or m['center_error'] > 0.70 * criteria['max_center_error']
         for m in measured_start['targets'].values()
     )
-    loss_budget = 0.005 if tight_margin else 0.05
+    ultra_tight = min(criteria['max_center_error'], criteria['max_scale_error']) <= 0.025
+    loss_budget = 0.005 if (tight_margin or ultra_tight) else 0.05
     best_end = dict(start)
     best_score = -float('inf')
-    desc = shot.get('description', '').lower()
-    is_close_up = shot.get('shot_type') in ('close_up', 'detail') or 'up and' in desc or 'pull back' in desc
+    is_close_up = shot.get('shot_type') in ('close_up', 'detail')
 
     def consider(end):
         nonlocal best_score, best_end
+        if not motion_matches(start, end, shot.get('motion', 'static')):
+            return
         if 'dolly' in end and end['dolly'] < min_safe_dolly:
             return
         if end['height'] < min_safe_height:
@@ -443,7 +501,9 @@ def plan_sweep(sim, shot, scene, surfaces):
                 + abs(end.get('truck', 0.0) - start.get('truck', 0.0))
                 + abs(end.get('dolly', 0.0) - start.get('dolly', 0.0))
                 + 0.6 * abs(end['pan'] - start['pan']) + 0.6 * abs(end['tilt'] - start['tilt']))
-        if disp < 0.02:
+        if disp < 0.015:
+            return
+        if ultra_tight and disp > 0.12:
             return
         losses = []
         for frac in (0.25, 0.5, 0.75, 1.0):
@@ -452,9 +512,10 @@ def plan_sweep(sim, shot, scene, surfaces):
             if start_eval['satisfies_observed_criteria'] and not res['satisfies_observed_criteria']:
                 return
             if measured_start['satisfies_observed_criteria']:
+                tol_factor = 0.65 if ultra_tight else 0.82
                 for m in res['targets'].values():
-                    if (m['center_error'] > 0.82 * criteria['max_center_error']
-                            or m['scale_error'] > 0.85 * criteria['max_scale_error']
+                    if (m['center_error'] > tol_factor * criteria['max_center_error']
+                            or m['scale_error'] > tol_factor * criteria['max_scale_error']
                             or m['headroom_error'] > 0.85 * criteria['headroom_tolerance']):
                         return
             if res['loss'] > start_eval['loss'] + loss_budget:
@@ -468,71 +529,52 @@ def plan_sweep(sim, shot, scene, surfaces):
                 bonus += 0.06
             if end.get('dolly', 0.0) < start.get('dolly', 0.0) - 0.04:
                 bonus += 0.06
-        elif 'truck' in axes and abs(end['truck'] - start['truck']) > 0.12:
-            bonus += 0.05
-        score = min(disp, 0.38) + bonus - 2.0 * mean_drift
+        else:
+            if 'truck' in axes and abs(end['truck'] - start['truck']) > 0.12:
+                bonus += 0.05
+            if abs(end['height'] - start['height']) > 0.04:
+                bonus += 0.04
+        score = min(disp, 0.52) + bonus - 2.0 * mean_drift
         if score > best_score:
             best_score = score
             best_end = end
 
-    dh_vals = [-0.14, -0.08, 0.0, 0.08, 0.14]
-    dp_vals = [-0.05, -0.025, 0.0, 0.025, 0.05]
-    dt_vals = np.linspace(-0.06, 0.06, 9)
-
-    for dh, dp in product(dh_vals, dp_vals):
-        if abs(dh) < 1e-4 and abs(dp) < 1e-4:
+    from .motion import DIRECTIONS
+    kind = shot.get('motion', 'static')
+    directions = list(DIRECTIONS.values()) if kind == 'sweep' else [DIRECTIONS[kind]]
+    lock = contract['subject_lock']
+    center = None if lock == 'none' else .5*(surfaces[lock].min(axis=0)+surfaces[lock].max(axis=0))
+    for axis, sign, _ in directions:
+        if axis not in start:
             continue
-        h_end = float(np.clip(start['height'] + np.clip(dh, -max_delta['height'], max_delta['height']), min_safe_height, limits['height'][1]))
-        p_end = float(np.clip(start['pan'] + np.clip(dp, -max_delta['pan'], max_delta['pan']), *limits['pan']))
-        for dt in dt_vals:
-            t_end = float(np.clip(start['tilt'] + np.clip(dt, -max_delta['tilt'], max_delta['tilt']), *limits['tilt']))
-            end = dict(start, height=h_end, pan=p_end, tilt=t_end, roll=0.0)
-            if 'truck' in axes:
-                end['truck'] = float(np.clip(start['truck'] + np.clip(-dp * 1.2, -max_delta['truck'], max_delta['truck']), *limits['truck']))
-            if 'dolly' in axes:
-                d_step = max(0.0, dh * 0.3) if tight_margin else dh * 0.3
-                end['dolly'] = float(np.clip(start['dolly'] + np.clip(d_step, -max_delta['dolly'], max_delta['dolly']), min_safe_dolly, limits['dolly'][1]))
-            consider(end)
-
-    if {'truck', 'dolly'} <= set(axes) and shot['targets']:
-        primary = max(
-            shot['targets'],
-            key=lambda t: (
-                float(np.linalg.norm(surfaces[t['object_id']].max(axis=0) - surfaces[t['object_id']].min(axis=0)))
-                if t['object_id'] in surfaces and len(surfaces[t['object_id']]) else 0.0
-            ),
-        )
-        pts = surfaces[primary['object_id']]
-        center = 0.5 * (pts.min(axis=0) + pts.max(axis=0))
-        dx0 = float(center[0] - (base_cam[0] + start['truck']))
-        dy0 = float(center[1] - (base_cam[1] + start['dolly']))
-        dz0 = float(center[2] - (base_cam[2] + start['height']))
-        dist0 = max(1e-3, math.hypot(dx0, dy0))
-        az0 = math.atan2(-dx0, dy0)
-        el0 = math.atan2(dz0, dist0)
-        d_trucks = [-0.36, -0.22, -0.10, 0.0, 0.10, 0.22, 0.36]
-        d_dollies = [-0.28, -0.16, 0.0, 0.14] if is_close_up else [-0.14, 0.0, 0.14]
-        d_heights = [0.0, 0.10, 0.18, 0.24] if is_close_up else [-0.14, -0.07, 0.0, 0.07, 0.14]
-        for d_tr, d_do, d_h in product(d_trucks, d_dollies, d_heights):
-            if abs(d_tr) + abs(d_do) + abs(d_h) < 0.05:
-                continue
-            tr_end = float(np.clip(start['truck'] + np.clip(d_tr, -max_delta['truck'], max_delta['truck']), *limits['truck']))
-            do_end = float(np.clip(start['dolly'] + np.clip(d_do, -max_delta['dolly'], max_delta['dolly']), min_safe_dolly, limits['dolly'][1]))
-            h_end = float(np.clip(start['height'] + np.clip(d_h, -max_delta['height'], max_delta['height']), min_safe_height, limits['height'][1]))
-            dx1 = float(center[0] - (base_cam[0] + tr_end))
-            dy1 = float(center[1] - (base_cam[1] + do_end))
-            dz1 = float(center[2] - (base_cam[2] + h_end))
-            dist1 = max(1e-3, math.hypot(dx1, dy1))
-            az1 = math.atan2(-dx1, dy1)
-            el1 = math.atan2(dz1, dist1)
-            dp_comp = np.clip(az1 - az0, -max_delta['pan'], max_delta['pan'])
-            dt_comp = np.clip(el1 - el0, -max_delta['tilt'], max_delta['tilt'])
-            for dp_fine, dt_fine in ((0.0, 0.0), (-0.015, 0.0), (0.015, 0.0), (0.0, -0.015), (0.0, 0.015)):
-                p_end = float(np.clip(start['pan'] + dp_comp + dp_fine, *limits['pan']))
-                t_end = float(np.clip(start['tilt'] + dt_comp + dt_fine, *limits['tilt']))
-                consider(dict(start, height=h_end, truck=tr_end, dolly=do_end, pan=p_end, tilt=t_end, roll=0.0))
-
+        end = dict(start)
+        end[axis] += sign*contract['amplitude_m']
+        if not limits[axis][0] <= end[axis] <= limits[axis][1]:
+            continue  # Never silently shrink a requested amplitude.
+        if abs(end[axis]-start[axis]) > max_delta[axis]:
+            continue
+        if center is not None:
+            old_pos = reference.world_from_camera[:3,3]
+            new_pos = old_pos.copy()
+            new_pos[{'truck':0,'dolly':1,'height':2}[axis]] += sign*contract['amplitude_m']
+            old_vec, new_vec = center-old_pos, center-new_pos
+            end['pan'] += math.atan2(-new_vec[0],new_vec[1])-math.atan2(-old_vec[0],old_vec[1])
+            end['tilt'] += math.atan2(new_vec[2],np.linalg.norm(new_vec[:2]))-math.atan2(old_vec[2],np.linalg.norm(old_vec[:2]))
+        if any(not limits[n][0] <= end[n] <= limits[n][1] or abs(end[n]-start[n]) > max_delta[n] for n in axes):
+            continue
+        consider(end)
+    if best_end != start:
+        from .safety import PathBlocked
+        try:
+            sim.path_validator.validate(sim.configuration,best_end)
+            path = sim.path_validator.validate(start,best_end)
+        except PathBlocked:
+            best_end = dict(start)
+            path = dict(certified=False, reason='requested_path_blocked')
+    else:
+        path = dict(certified=False, reason='no_framing_preserving_path_at_requested_amplitude')
     displacement = {n: round(best_end[n] - start[n], 5) for n in axes}
     return dict(start=start, end=best_end, displacement=displacement,
-                continuous=any(abs(v) > 1e-4 for v in displacement.values()))
+                continuous=any(abs(v) > 1e-4 for v in displacement.values()),
+                reason='framing_preserving_search', contract=contract, path_validation=path)
 
