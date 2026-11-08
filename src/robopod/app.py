@@ -12,9 +12,20 @@ import time
 from urllib.parse import urlsplit
 
 import cv2
+import mujoco
+import numpy as np
 
 from .simulation import Simulation
 from .recording import Stopped
+
+
+PERTURB_ACTIONS = {
+    'perturb_person_left': ('person', (0.35, 0.0, 0.0), 'Scene perturbation: nudging presenter left…'),
+    'perturb_person_right': ('person', (-0.35, 0.0, 0.0), 'Scene perturbation: nudging presenter right…'),
+    'perturb_person_back': ('person', (0.0, 0.35, 0.0), 'Scene perturbation: nudging presenter back…'),
+    'perturb_product': ('product', (0.30, 0.0, 0.0), 'Scene perturbation: sliding synthesizer…'),
+    'perturb_occlusion': ('occlusion', (0.0, 0.0, 0.0), 'Scene perturbation: stepping into occlusion…'),
+}
 
 
 class Cancelled(Exception):
@@ -26,6 +37,7 @@ class AppState:
         self.lock = threading.Lock()
         self.token = secrets.token_urlsafe(24)
         self.commands = queue.Queue()
+        self.perturbations = queue.Queue()
         self.cancel = threading.Event()
         self.paused = threading.Event()
         self.stop = threading.Event()
@@ -56,7 +68,7 @@ class AppState:
             self.images[name] = content
 
     def submit(self, action, brief='', config=None):
-        if action not in ('restart', 'explore', 'plan', 'demo', 'execute', 'pause', 'resume', 'stop', 'configure'):
+        if action not in ('restart', 'explore', 'plan', 'demo', 'execute', 'pause', 'resume', 'stop', 'configure', *PERTURB_ACTIONS):
             raise ValueError('Unknown action')
         if action == 'plan' and (not isinstance(brief, str) or not 1 <= len(brief.strip()) <= 4000):
             raise ValueError('Enter a creative brief of 1–4000 characters')
@@ -64,6 +76,15 @@ class AppState:
             from .learned import validate_config
             brief = validate_config(config)
         with self.lock:
+            if action in PERTURB_ACTIONS:
+                if self.data['phase'] != 'execute' or not self.data['busy']:
+                    raise ValueError('Scene perturbations require an active execution')
+                _, _, message = PERTURB_ACTIONS[action]
+                self.perturbations.put(action)
+                self.data['status'] = message
+                self.data['events'].append(message)
+                self.data['events'] = self.data['events'][-80:]
+                return
             if action in ('pause','resume','stop'):
                 if self.data['phase'] != 'execute' or not self.data['busy']:
                     raise ValueError('Playback controls require an active execution')
@@ -126,8 +147,73 @@ class Studio:
         self.epoch = 0
         self.planner = None
         self.plan_results = queue.Queue()
+        self.active_perturbation = None
+        self.last_sim_time = 0.0
         self.last_frame = 0
         self.frame_number = 0
+
+    def clear_perturbations(self):
+        self.active_perturbation = None
+        self.last_sim_time = 0.0
+        while not self.state.perturbations.empty():
+            try:
+                self.state.perturbations.get_nowait()
+            except queue.Empty:
+                break
+
+    def _perturbation_target(self, sim, action):
+        person = int(sim.model.body('person').mocapid[0])
+        product = int(sim.model.body('product').mocapid[0])
+        start = sim.data.mocap_pos.copy()
+        end = start.copy()
+        person_low, person_high = np.array([-1.2, 0.1, 0.0]), np.array([1.2, 2.2, 0.0])
+        product_low, product_high = np.array([-0.85, 0.45, 0.82]), np.array([0.85, 1.15, 1.45])
+        target_kind, delta, _ = PERTURB_ACTIONS[action]
+        if target_kind == 'person':
+            end[person] = np.clip(start[person] + np.asarray(delta, dtype=float), person_low, person_high)
+        elif target_kind == 'product':
+            dx = -abs(delta[0]) if start[product, 0] > 0.15 else abs(delta[0])
+            end[product] = np.clip(start[product] + np.array([dx, delta[1], delta[2]], dtype=float), product_low, product_high)
+        elif target_kind == 'occlusion':
+            end[person] = np.clip(
+                np.array([start[product, 0], max(0.95, start[product, 1] + 0.35), start[person, 2]], dtype=float),
+                person_low, person_high,
+            )
+            end[product] = np.clip(
+                np.array([end[person, 0], start[product, 1], 1.22], dtype=float),
+                product_low, product_high,
+            )
+            if np.linalg.norm(end - start) < 0.05:
+                shift = -0.35 if start[person, 0] > 0.0 else 0.35
+                end[person, 0] = float(np.clip(start[person, 0] + shift, person_low[0], person_high[0]))
+                end[product, 0] = float(np.clip(end[person, 0], product_low[0], product_high[0]))
+        return end
+
+    def apply_perturbation(self, sim):
+        now = float(sim.data.time)
+        if now < self.last_sim_time:
+            self.last_sim_time = now
+        prev_time = self.last_sim_time
+        self.last_sim_time = now
+        if self.active_perturbation is None:
+            try:
+                action = self.state.perturbations.get_nowait()
+            except queue.Empty:
+                return
+            self.active_perturbation = dict(
+                action=action,
+                start_time=prev_time if now - prev_time <= 0.5 else now,
+                duration=0.5,
+                start_mocap=sim.data.mocap_pos.copy(),
+                end_mocap=self._perturbation_target(sim, action),
+            )
+        pert = self.active_perturbation
+        t = min(1.0, max(0.0, (now - pert['start_time']) / max(pert['duration'], 1e-6)))
+        blend = 3.0 * t * t - 2.0 * t * t * t
+        sim.data.mocap_pos[:] = pert['start_mocap'] + blend * (pert['end_mocap'] - pert['start_mocap'])
+        mujoco.mj_forward(sim.model, sim.data)
+        if t >= 1.0 - 1e-9:
+            self.active_perturbation = None
 
     def check_cancel(self):
         if self.state.cancel.is_set():
@@ -142,6 +228,7 @@ class Studio:
 
     def tick(self, sim):
         self.check_cancel()
+        self.apply_perturbation(sim)
         if time.monotonic()-self.last_frame >= .12:
             self.frame(sim)
 
@@ -199,6 +286,7 @@ class Studio:
         self.state.cancel.clear()
         self.state.stop.clear()
         self.state.paused.clear()
+        self.clear_perturbations()
         if self.sim:
             self.sim.close()
         self.sim = OwnerSimulation(self.tick)
@@ -295,6 +383,7 @@ class Studio:
             from .replanning import execute_with_replanning
             from .mapping import SceneMap
             # Plans are based on the surveyed original scene, so restore that initial scene.
+            self.clear_perturbations()
             self.sim.reset()
             self.live_map = SceneMap()
             self.state.update(results=[], active_shot=None, shot_metrics=None, sequence_video=None, teleprompter='Hold position. Preparing the first shot.')
