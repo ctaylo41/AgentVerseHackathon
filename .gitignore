@@ -6,3 +6,4 @@ outputs/
 MUJOCO_LOG.TXT
 models/*.pt
 models/*.task
+.env

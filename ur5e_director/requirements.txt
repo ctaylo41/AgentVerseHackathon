@@ -1,0 +1,8 @@
+mujoco
+mink
+robot_descriptions
+opencv-python
+python-dotenv
+google-genai>=2.3.0
+quadprog
+daqp
