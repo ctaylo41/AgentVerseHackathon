@@ -55,14 +55,20 @@ class Teleprompter:
 
 
 def creative_action(subject_id, text):
-    """Small exact phrase vocabulary; never guess arbitrary natural-language actions."""
+    """Interpret Gemma's natural-language teleprompter directions into executable subject responses."""
     if subject_id != 'body:person':
-        return None  # Unfamiliar people have no configured scripted actor.
+        return None  # Unfamiliar people have no configured actor.
     normalized = text.lower().strip().rstrip('.!')
+    if not normalized:
+        return None
+    if re.search(r'\b(?:backflip|flip|juggle|sing|song|dance|jump|cartwheel|fly|swim|climb|handstand)\b', normalized):
+        return None
     performances = {
         'turn your shoulders toward the camera': 'turn_to_camera', 'turn toward the camera': 'turn_to_camera',
         'turn toward the instrument': 'turn_to_product', 'turn toward the synthesizer': 'turn_to_product',
         'look at the camera': 'look_at_camera', 'look at the camera and smile': 'look_and_smile',
+        'look away from the camera': 'look_away', 'look away': 'look_away',
+        'turn away from the camera': 'look_away', 'look to the side': 'look_away',
         'smile': 'smile', 'point to the controls': 'point_to_product', 'point to the product': 'point_to_product',
         'hold the product closer to your face': 'hold_near_face', 'hold the product near your face': 'hold_near_face',
     }
@@ -90,7 +96,41 @@ def creative_action(subject_id, text):
     if normalized in product_phrases:
         axis, delta = product_phrases[normalized]
         return Instruction('creative', 'body:product', text, axis, delta)
-    return None
+    # Natural-language interpretation for unscripted Gemma teleprompter directions:
+    no_touch = bool(re.search(r'\b(?:do not|don\'t|without|never|avoid|hands off)\b.*\b(?:move|touch|lift|hold)\b', normalized))
+    if re.search(r'\b(?:look|gaze|glance|turn|face)\b.*\b(?:away|side|off[- ]camera|elsewhere|profile|window|plant)\b', normalized):
+        return Instruction('creative', subject_id, text, -1, 0., 'look_away')
+    if re.search(r'\b(?:step|move|shift|walk|lean)\b', normalized) and not re.search(r'\b(?:camera|rig|dolly|truck)\s+(?:moves|tracks|sweeps)\b', normalized):
+        if not no_touch and re.search(r'\b(?:product|synth|synthesizer|instrument|keyboard)\b', normalized):
+            if re.search(r'\b(?:raise|lift|higher|up)\b', normalized):
+                return Instruction('creative', 'body:product', text, 2, .15)
+            if re.search(r'\b(?:lower|down)\b', normalized):
+                return Instruction('creative', 'body:product', text, 2, -.15)
+            if re.search(r'\b(?:closer|forward|toward)\b', normalized):
+                return Instruction('creative', 'body:product', text, 1, -.3)
+            if re.search(r'\b(?:back|farther|away)\b', normalized):
+                return Instruction('creative', 'body:product', text, 1, .3)
+        if re.search(r'\b(?:left)\b', normalized):
+            return Instruction('creative', subject_id, text, 0, .25)
+        if re.search(r'\b(?:right)\b', normalized):
+            return Instruction('creative', subject_id, text, 0, -.25)
+        if re.search(r'\b(?:closer|forward|toward the camera|in)\b', normalized):
+            return Instruction('creative', subject_id, text, 1, -.3)
+        if re.search(r'\b(?:back|backward|farther|away)\b', normalized):
+            return Instruction('creative', subject_id, text, 1, .3)
+    if not no_touch and re.search(r'\b(?:hold|lift|bring)\b.*\b(?:face|up|close)\b', normalized):
+        return Instruction('creative', subject_id, text, -1, 0., 'hold_near_face')
+    if re.search(r'\b(?:point|gesture|show|indicate|reach|touch|controls|keys|knobs)\b', normalized) and not no_touch:
+        return Instruction('creative', subject_id, text, -1, 0., 'point_to_product')
+    if re.search(r'\b(?:turn|angle|orient|face)\b.*\b(?:synth|synthesizer|instrument|product|keyboard|desk|table)\b', normalized):
+        return Instruction('creative', subject_id, text, -1, 0., 'turn_to_product')
+    if re.search(r'\b(?:smile|smiling|grin|warmly|friendly)\b', normalized):
+        if re.search(r'\b(?:look|camera|lens|viewer)\b', normalized):
+            return Instruction('creative', subject_id, text, -1, 0., 'look_and_smile')
+        return Instruction('creative', subject_id, text, -1, 0., 'smile')
+    if re.search(r'\b(?:turn|shoulders|orient)\b.*\b(?:camera|lens|viewer|front)\b', normalized):
+        return Instruction('creative', subject_id, text, -1, 0., 'turn_to_camera')
+    return Instruction('creative', subject_id, text, -1, 0., 'look_at_camera')
 
 
 def correction(shot, measured, scene):

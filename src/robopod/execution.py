@@ -132,18 +132,20 @@ def execute_plan(sim, plan_path, scene_path, output, *, progress=print, preview=
     trace = []
     from .recording import Recorder, Stopped
     sequence_video = shot_video = None
+    current_cue = [None]
     def event(kind, **values):
         if on_event:
             on_event(dict(kind=kind, **values))
-    def show(simulator, instruction=''):
+    def show(simulator, instruction=None):
+        cue = instruction if instruction else current_cue[0]
         if on_frame is not None:
-            on_frame(simulator, instruction)
+            on_frame(simulator, cue)
         if preview:
             obs = simulator.capture()
             image = cv2.cvtColor(obs.rgb, cv2.COLOR_RGB2BGR)
-            if instruction:
+            if cue:
                 import textwrap
-                for line, text in enumerate(textwrap.wrap(instruction, 58)):
+                for line, text in enumerate(textwrap.wrap(cue, 58)):
                     cv2.putText(image, text, (10, 30+line*25), cv2.FONT_HERSHEY_SIMPLEX, .55, (0,255,255), 2)
             cv2.imshow('Robopod shot execution', image)
             if cv2.waitKey(1) & 0xff == ord('q'):
@@ -164,7 +166,9 @@ def execute_plan(sim, plan_path, scene_path, output, *, progress=print, preview=
             for index, shot in enumerate(plan['shots']):
                 folder = output/f'shot_{index:03d}'
                 folder.mkdir()
-                event('shot_started', shot_id=shot['shot_id'], index=index, total=len(plan['shots']))
+                shot_cue = ' · '.join(i['instruction'] for i in shot.get('human_instructions', []) if i.get('instruction')) or shot.get('description', '')
+                current_cue[0] = shot_cue
+                event('shot_started', shot_id=shot['shot_id'], index=index, total=len(plan['shots']), teleprompter=shot_cue)
                 before = sim.save(folder/'before')
                 if progress:
                     progress(f"{shot['shot_id']}: searching reachable configurations")

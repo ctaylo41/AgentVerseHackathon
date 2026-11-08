@@ -417,9 +417,14 @@ class Studio:
         if kind == 'replanning':
             self.state.update(active_shot=None,teleprompter=f"Replanning {event['attempt']}/{event['budget']} from observed failure evidence…")
         elif kind == 'plan_revised':
-            self.state.update(last_replan=event['plan'], plan_notes=[f"Gemma revision {event['attempt']} is executing failed shots with unchanged objectives. Starting a new take uses the original plan."])
+            self.state.update(last_replan=event['plan'], teleprompter=f"Executing replan {event['attempt']} with adjusted viewpoint/cooperation…", plan_notes=[f"Gemma revision {event['attempt']} is executing failed shots with unchanged objectives. Starting a new take uses the original plan."])
+        elif kind == 'replan_failed':
+            self.state.update(active_shot=None, teleprompter='Replan could not revise unresolved shots. Review results below.', plan_notes=[f"Replan {event['attempt']} was rejected: {event['error']}"])
         elif kind == 'shot_started':
-            self.state.update(active_shot=event['shot_id'], shot_metrics=None)
+            updates = dict(active_shot=event['shot_id'], shot_metrics=None)
+            if event.get('teleprompter'):
+                updates['teleprompter'] = event['teleprompter']
+            self.state.update(**updates)
         elif kind == 'measurement':
             self.state.update(shot_metrics=event)
         elif kind == 'shot_completed':
@@ -453,7 +458,9 @@ class Studio:
             self.plan_path = output/'shot_plan.json'
             brief = json.loads((output/'context.json').read_text()).get('creative_brief', '') if (output/'context.json').exists() else ''
             notes = ['Motion is executed only as specified per shot. Legacy plans default to static; optical zoom is unavailable.']
-            self.state.update(plan=plan, plan_source='Local Gemma 4 E2B • validated', plan_brief=brief, plan_version=output.name, plan_notes=notes)
+            first_cue = next((i['instruction'] for s in plan.get('shots', []) for i in s.get('human_instructions', []) if i.get('instruction')),
+                             plan['shots'][0]['description'] if plan.get('shots') else 'Gemma plan ready.')
+            self.state.update(plan=plan, plan_source='Local Gemma 4 E2B • validated', plan_brief=brief, plan_version=output.name, plan_notes=notes, teleprompter=first_cue)
             self.state.log(f"Validated {len(plan['shots'])} shots. Ready to execute.")
 
 

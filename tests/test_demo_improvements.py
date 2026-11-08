@@ -138,3 +138,35 @@ class DemoImprovements(unittest.TestCase):
             studio.tick(sim)
             self.assertAlmostEqual(float(sim.data.mocap_pos[person, 0]), float(sim.data.mocap_pos[product, 0]), places=3)
             self.assertAlmostEqual(float(sim.data.mocap_pos[product, 2]), 1.22, places=3)
+
+    def test_live_ollama_replan_fallback_and_look_away_cooperation(self):
+        from robopod.actors import perform
+        from robopod.gemma import OllamaClient, PlannerError
+        from robopod.replanning import revise_plan
+        from robopod.teleprompter import creative_action
+        self.assertEqual(creative_action('body:person', 'look away from the camera').action, 'look_away')
+        gemma_line = 'Look away toward the side of the room while standing by the desk.'
+        parsed_line = creative_action('body:person', gemma_line)
+        self.assertEqual(parsed_line.action, 'look_away')
+        self.assertEqual(parsed_line.text, gemma_line)
+        self.assertEqual(creative_action('body:person', 'Smile warmly at the camera as you introduce the synthesizer.').action, 'look_and_smile')
+        with Simulation() as sim:
+            before = sim.data.geom('nose').xpos.copy()
+            perform(sim, 'look_away')
+            after = sim.data.geom('nose').xpos.copy()
+            self.assertGreater(float(np.linalg.norm(after - before)), 0.015)
+
+        class StubLiveClient(OllamaClient):
+            def check_model(self):
+                return {'model': 'gemma4:e2b'}
+            def chat(self, messages, *, schema=None):
+                raise PlannerError('Ollama response was incomplete or hit its token limit')
+
+        scene = copy.deepcopy(SCENE)
+        scene['viewpoints']['view_008'] = {'joints': {'yaw': 0.2, 'pitch': -0.1, 'height': 1.25, 'roll': 0.0}, 'simulation_time': 2.0}
+        plan = valid_plan()
+        image = np.zeros((48, 64, 3), dtype=np.uint8)
+        with tempfile.TemporaryDirectory() as tmp:
+            revised = revise_plan(plan, scene, [{'shot_id': 'shot_1'}], image, 'Film the presenter and product.', tmp, client=StubLiveClient())
+            self.assertEqual(revised['shots'][0]['preferred_view_id'], 'view_008')
+            self.assertEqual(revised['shots'][0]['completion'], plan['shots'][0]['completion'])

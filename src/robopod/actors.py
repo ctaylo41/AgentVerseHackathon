@@ -28,6 +28,10 @@ def perform(sim, action, callback=None, trace=None):
         target=camera if action=='turn_to_camera' else sim.data.mocap_pos[product]
         angle=math.atan2(target[0]-center[0],-(target[1]-center[1]))-root_yaw
         body_end[upper]=yaw(float(np.clip(angle,-1.2,1.2)))
+    if action=='look_away':
+        away=float(np.clip(facing-root_yaw+(.9 if facing<=root_yaw else -.9),-1.2,1.2))
+        body_end[upper]=yaw(away*.6)
+        body_end[head]=yaw(away*.8)
     if action in ('look_at_camera','look_and_smile'):
         upper_yaw=2*math.atan2(body_start[upper,3],body_start[upper,0])
         body_end[head]=yaw(float(np.clip(facing-root_yaw-upper_yaw,-1.1,1.1)))
@@ -80,6 +84,16 @@ def observed(before, after, action, camera_position=None):
             return False,dict(reason='Head and held product must both be visible')
         distance=float(np.linalg.norm(np.median(prop.points_world,axis=0)-head))
         return distance<.65,dict(observed_face_product_distance_m=distance,threshold_m=.65)
+    if action=='look_away':
+        moved=evidence('nose') or evidence('head') or 0.0
+        eyes=[new.landmarks.get(k) for k in ('left_eye','right_eye')]
+        nose_uv=(new.landmarks.get('nose') or {}).get('pixel_uv')
+        turned_away=False
+        if all(e is not None for e in eyes) and nose_uv is not None:
+            lo,hi=sorted(e['pixel_uv'][0] for e in eyes)
+            span=max(hi-lo,1.0)
+            turned_away=not (lo+.2*span<=nose_uv[0]<=hi-.2*span)
+        return bool(moved>.012 or turned_away),dict(observed_head_turn_m=float(moved),turned_away=bool(turned_away))
     if action in ('smile','look_and_smile'):
         head=landmark(new,'head');left=landmark(new,'mouth_left');right=landmark(new,'mouth_right')
         if head is None or left is None or right is None:

@@ -14,7 +14,7 @@ import cv2
 
 from .exploration import _write_json
 from .brief import requirements, validate_brief
-from .planning import SHOT_PLAN_SCHEMA, PlanValidationError, parse_plan, scene_plan_schema, _validate, obj, array, text
+from .planning import SHOT_PLAN_SCHEMA, PlanValidationError, parse_plan, scene_plan_schema, _validate, obj, array, text, number
 
 MODEL = 'gemma4:e2b'
 ENDPOINT = 'http://127.0.0.1:11434'
@@ -194,10 +194,7 @@ Never replace a requested subject with the first person or instrument in the sce
 shot order and distinct subjects. Human instructions that cannot be simulated remain unresolved.
 When the brief asks for a sequence (e.g. presenter/product then controls close-up), include separate shots.
 Target part:product:controls or part:product:keys for requested detail shots when those IDs are supplied.
-Supported scripted human phrases: "turn your shoulders toward the camera", "turn toward the instrument",
-"look at the camera", "smile", "look at the camera and smile", "point to the controls",
-"hold the product near your face", "step closer to the camera", "step back", "step to your left",
-"step to your right", "raise the product", "lower the product". Use exact phrases for scripted responses.
+Write natural, unscripted teleprompter directions for the presenter in human_instructions tailored to each shot and the creative brief (for example, where to look, how to pose or gesture, or what to present to the viewer). Do not use a canned script—come up with natural spoken directions yourself.
 Do not invent objects.
 The deterministic controller will later check feasibility; this plan does not execute any motion.'''
 
@@ -245,6 +242,27 @@ def generate_plan(survey, scene_path, brief, output, *, client=None, image_count
         target_schema = schema['properties']['shots']['items']['properties']['targets']['items']['properties']
         target_schema['center_x']['enum'] = [0.333333, 0.5, 0.666667]
     target_schema = schema['properties']['shots']['items']['properties']['targets']['items']['properties']
+    live_ollama = isinstance(client, OllamaClient)
+    subject_ids = (sorted(k for k, v in scene['objects'].items() if v.get('category') not in ('wall', 'floor', 'furniture'))
+                   or sorted(scene['objects']))
+    bg_pool = (sorted(k for k, v in scene['objects'].items() if v.get('category') not in ('wall', 'floor'))
+               or sorted(scene['objects']))
+    if live_ollama:
+        generated_shot['properties']['targets']['maxItems'] = 1
+        generated_shot['properties']['targets']['items']['properties']['object_id']['enum'] = subject_ids
+        generated_shot['properties']['background_object_ids']['maxItems'] = 2
+        generated_shot['properties']['background_object_ids']['items']['enum'] = bg_pool
+        comp = generated_shot['properties']['completion']['properties']
+        comp['max_center_error'] = number(0.15, 0.25)
+        comp['max_scale_error'] = number(0.20, 0.30)
+        comp['min_visible_fraction'] = number(0.10, 0.40)
+        comp['headroom_fraction'] = number(0.08, 0.22)
+        comp['headroom_tolerance'] = number(0.12, 0.20)
+        comp['hold_seconds'] = number(0.2, 0.8)
+        if intent['movement_requested']:
+            generated_shot['properties']['motion_parameters']['properties']['amplitude_m'] = number(0.0, 0.25)
+        if not intent['human_actions_forbidden'] and generated_shot['properties']['human_instructions'].get('maxItems', 3) > 0:
+            generated_shot['properties']['human_instructions']['maxItems'] = 2
     # Feasibility belongs to execution; do not force every shot into one framing preset.
     context['explicit_brief_requirements'] = intent
     context['execution_capabilities'] = 'Moves between shot compositions and executes continuous in-shot camera sweeps while holding framing. Optical zoom is not implemented; do not promise optical zoom.'
@@ -269,7 +287,7 @@ def generate_plan(survey, scene_path, brief, output, *, client=None, image_count
                 'shot_id': text(40),
                 'shot_type': copy.deepcopy(schema['properties']['shots']['items']['properties']['shot_type']),
                 'description': text(300),
-                'target_ids': array(dict(type='string', enum=sorted(scene['objects'])), 1, 4),
+                'target_ids': array(dict(type='string', enum=subject_ids if live_ollama else sorted(scene['objects'])), 1, 1 if live_ollama else 4),
                 'motion': copy.deepcopy(schema['properties']['shots']['items']['properties']['motion']),
                 'horizon': copy.deepcopy(schema['properties']['shots']['items']['properties']['horizon']),
                 'motion_parameters': copy.deepcopy(schema['properties']['shots']['items']['properties']['motion_parameters']),
@@ -331,7 +349,7 @@ def generate_plan(survey, scene_path, brief, output, *, client=None, image_count
                                                    for k,v in stage['motion_parameters'].items() if k != 'direction'})
                 fields['targets'].update(minItems=len(stage['target_ids']), maxItems=len(stage['target_ids']))
                 fields['targets']['items']['properties']['object_id']['enum'] = stage['target_ids']
-                backgrounds = sorted(set(scene['objects']) - set(stage['target_ids']))
+                backgrounds = sorted(set(bg_pool if live_ollama else scene['objects']) - set(stage['target_ids']))
                 if backgrounds:
                     fields['background_object_ids']['items']['enum'] = backgrounds
                 else:
