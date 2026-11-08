@@ -26,7 +26,7 @@ def _fallback_viewpoint(old_view, scene):
         return min(
             alternatives,
             key=lambda vid: sum(
-                abs(float(((scene['viewpoints'].get(vid) or {}).get(k, 0.0)) - float(old_joints.get(k, 0.0)))
+                abs(float((((scene['viewpoints'].get(vid) or {}).get('joints')) or {}).get(k, 0.0)) - float(old_joints.get(k, 0.0)))
                 for k in ('yaw', 'pitch', 'height', 'roll')
             ),
         )

@@ -265,8 +265,8 @@ class Studio:
                           objects=[dict(object_id=k, label=v['label'], category=v['category'],
                                         visibility=v['visibility'], observations=v['observation_count'])
                                    for k,v in self.live_map.objects.items()])
-        if instruction is not None:
-            self.state.update(teleprompter=instruction or 'Hold position. The camera is working.')
+        if instruction:
+            self.state.update(teleprompter=instruction)
         if self.frame_number % 8 == 0:
             ok, encoded = cv2.imencode('.png', self.live_map.topdown())
             if ok:
@@ -386,7 +386,10 @@ class Studio:
             self.clear_perturbations()
             self.sim.reset()
             self.live_map = SceneMap()
-            self.state.update(results=[], active_shot=None, shot_metrics=None, sequence_video=None, teleprompter='Hold position. Preparing the first shot.')
+            current_plan = self.state.snapshot().get('plan') or {}
+            first_cue = next((i['instruction'] for s in current_plan.get('shots', []) for i in s.get('human_instructions', []) if i.get('instruction')),
+                             current_plan.get('shots', [{}])[0].get('description', 'Preparing first shot…') if current_plan.get('shots') else 'Preparing first shot…')
+            self.state.update(results=[], active_shot=None, shot_metrics=None, sequence_video=None, teleprompter=first_cue)
             output = self.new_path('execution')
             self.state.update(output=str(output.resolve()))
             self.frame(self.sim)

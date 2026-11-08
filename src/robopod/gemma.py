@@ -262,7 +262,7 @@ def generate_plan(survey, scene_path, brief, output, *, client=None, image_count
         if intent['movement_requested']:
             generated_shot['properties']['motion_parameters']['properties']['amplitude_m'] = number(0.0, 0.25)
         if not intent['human_actions_forbidden'] and generated_shot['properties']['human_instructions'].get('maxItems', 3) > 0:
-            generated_shot['properties']['human_instructions']['maxItems'] = 2
+            generated_shot['properties']['human_instructions'].update(minItems=1, maxItems=2)
     # Feasibility belongs to execution; do not force every shot into one framing preset.
     context['explicit_brief_requirements'] = intent
     context['execution_capabilities'] = 'Moves between shot compositions and executes continuous in-shot camera sweeps while holding framing. Optical zoom is not implemented; do not promise optical zoom.'

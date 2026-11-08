@@ -163,7 +163,10 @@ class DemoImprovements(unittest.TestCase):
                 raise PlannerError('Ollama response was incomplete or hit its token limit')
 
         scene = copy.deepcopy(SCENE)
-        scene['viewpoints']['view_008'] = {'joints': {'yaw': 0.2, 'pitch': -0.1, 'height': 1.25, 'roll': 0.0}, 'simulation_time': 2.0}
+        scene['viewpoints'] = {
+            'view_007': {'joints': {'yaw': 0.0, 'pitch': 0.0, 'height': 1.2, 'roll': 0.0}, 'simulation_time': 1.0},
+            'view_008': {'joints': {'yaw': 0.2, 'pitch': -0.1, 'height': 1.25, 'roll': 0.0}, 'simulation_time': 2.0},
+        }
         plan = valid_plan()
         image = np.zeros((48, 64, 3), dtype=np.uint8)
         with tempfile.TemporaryDirectory() as tmp:

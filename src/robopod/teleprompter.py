@@ -63,6 +63,10 @@ def creative_action(subject_id, text):
         return None
     if re.search(r'\b(?:backflip|flip|juggle|sing|song|dance|jump|cartwheel|fly|swim|climb|handstand)\b', normalized):
         return None
+    if re.search(r'\b(?:start close to|frame the presenter|camera tracks|camera moves|dolly|pedestal|rule of thirds)\b', normalized):
+        return None
+    if 'smile' in normalized and 'point' in normalized:
+        return None
     performances = {
         'turn your shoulders toward the camera': 'turn_to_camera', 'turn toward the camera': 'turn_to_camera',
         'turn toward the instrument': 'turn_to_product', 'turn toward the synthesizer': 'turn_to_product',
