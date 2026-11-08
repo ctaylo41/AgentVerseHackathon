@@ -101,6 +101,85 @@ class Simulation:
         transform[:3, 3] = self.data.cam_xpos[self.camera_id]
         return Observation(rgb, depth, segmentation, k, transform, float(self.data.time), self.configuration)
 
+    def capture_overview(self):
+        if self.renderer is None:
+            self.renderer = mujoco.Renderer(self.model, height=self.height, width=self.width)
+        cam = mujoco.MjvCamera()
+        mujoco.mjv_defaultFreeCamera(self.model, cam)
+        cam.type = mujoco.mjtCamera.mjCAMERA_FREE
+        cam.lookat[:] = [0.0, -0.55, 1.2]
+        cam.distance = 4.1
+        cam.azimuth = 135.0
+        cam.elevation = -20.0
+        self.renderer.update_scene(self.data, camera=cam)
+        scn = self.renderer.scene
+
+        def add_rod(p1, p2, radius, rgba):
+            if scn.ngeom >= scn.maxgeom:
+                return
+            dist = float(np.linalg.norm(np.asarray(p2) - np.asarray(p1)))
+            if dist < 1e-4:
+                return
+            g = scn.geoms[scn.ngeom]
+            mujoco.mjv_initGeom(
+                g, mujoco.mjtGeom.mjGEOM_CAPSULE, np.zeros(3), np.zeros(3), np.eye(3).flatten(),
+                np.asarray(rgba, dtype=np.float32),
+            )
+            mujoco.mjv_connector(g, mujoco.mjtGeom.mjGEOM_CAPSULE, radius, np.asarray(p1, dtype=float), np.asarray(p2, dtype=float))
+            scn.ngeom += 1
+
+        def add_sphere(pos, radius, rgba):
+            if scn.ngeom >= scn.maxgeom:
+                return
+            g = scn.geoms[scn.ngeom]
+            mujoco.mjv_initGeom(
+                g, mujoco.mjtGeom.mjGEOM_SPHERE, np.array([radius, 0.0, 0.0]),
+                np.asarray(pos, dtype=float), np.eye(3).flatten(), np.asarray(rgba, dtype=np.float32),
+            )
+            scn.ngeom += 1
+
+        carriage_pos = self.data.body('carriage').xpos.copy()
+        shoulder_pos = self.data.body('shoulder_boom').xpos.copy()
+        forearm_pos = self.data.body('forearm_boom').xpos.copy()
+        pan_pos = self.data.body('pan_frame').xpos.copy()
+        rig_pos = self.data.cam_xpos[self.camera_id].copy()
+        rig_rot = self.data.cam_xmat[self.camera_id].reshape(3, 3) @ np.diag([1, -1, -1])
+
+        # 3D Gantry & Telescoping Robotic Arm Links
+        base_floor = np.array([carriage_pos[0], carriage_pos[1], 0.0])
+        base_top = np.array([carriage_pos[0], carriage_pos[1], 2.25])
+        add_rod(base_floor, base_top, 0.035, [0.42, 0.46, 0.50, 1.0])
+        add_rod([shoulder_pos[0] - 0.15, carriage_pos[1], carriage_pos[2]],
+                [carriage_pos[0] + 0.15, carriage_pos[1], carriage_pos[2]], 0.028, [0.55, 0.60, 0.65, 1.0])
+        add_rod(carriage_pos, shoulder_pos, 0.032, [0.91, 0.73, 0.40, 1.0])
+        add_rod(shoulder_pos, pan_pos, 0.028, [0.91, 0.73, 0.40, 1.0])
+        add_sphere(carriage_pos, 0.055, [0.25, 0.28, 0.32, 1.0])
+        add_sphere(shoulder_pos, 0.052, [0.91, 0.73, 0.40, 1.0])
+        add_sphere(pan_pos, 0.058, [0.38, 0.82, 0.72, 1.0])
+        add_sphere(rig_pos, 0.045, [0.95, 0.80, 0.45, 1.0])
+
+        # 3D Camera Frustum & Optical Sightline
+        f_dist = 0.65
+        f_w, f_h = 0.28, 0.21
+        corners = [
+            rig_pos + f_dist * rig_rot[:, 2] + sx * f_w * rig_rot[:, 0] + sy * f_h * rig_rot[:, 1]
+            for sx, sy in ((1, 1), (-1, 1), (-1, -1), (1, -1))
+        ]
+        for idx in range(4):
+            add_rod(rig_pos, corners[idx], 0.008, [0.62, 0.85, 0.75, 0.85])
+            add_rod(corners[idx], corners[(idx + 1) % 4], 0.008, [0.62, 0.85, 0.75, 0.85])
+        add_rod(rig_pos, rig_pos + 2.6 * rig_rot[:, 2], 0.010, [0.95, 0.75, 0.38, 0.90])
+
+        rgb = self.renderer.render().copy()
+        bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        cfg = self.configuration
+        hud = (f"RIG POSE  H:{cfg.get('height',0):.2f}m  T:{cfg.get('truck',0):+.2f}m  "
+               f"D:{cfg.get('dolly',0):+.2f}m  Pan:{math.degrees(cfg.get('pan',0)):+.1f}deg  "
+               f"Tilt:{math.degrees(cfg.get('tilt',0)):+.1f}deg")
+        cv2.rectangle(bgr, (0, self.height - 30), (self.width, self.height), (17, 20, 22), -1)
+        cv2.putText(bgr, hud, (12, self.height - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (233, 185, 103), 1, cv2.LINE_AA)
+        return bgr
+
     def geometry_catalog(self):
         result = {}
         for i in range(self.model.ngeom):

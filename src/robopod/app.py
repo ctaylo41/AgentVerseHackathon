@@ -261,6 +261,10 @@ class Studio:
         ok, encoded = cv2.imencode('.jpg', annotate(obs, detections), [cv2.IMWRITE_JPEG_QUALITY, 85])
         if ok:
             self.state.image('camera.jpg', encoded.tobytes())
+        if hasattr(sim, 'capture_overview'):
+            ov_ok, ov_encoded = cv2.imencode('.jpg', sim.capture_overview(), [cv2.IMWRITE_JPEG_QUALITY, 85])
+            if ov_ok:
+                self.state.image('overview.jpg', ov_encoded.tobytes())
         self.state.update(frame=self.frame_number, joints=obs.joints, simulation_time=obs.simulation_time,
                           objects=[dict(object_id=k, label=v['label'], category=v['category'],
                                         visibility=v['visibility'], observations=v['observation_count'])
@@ -387,8 +391,7 @@ class Studio:
             self.sim.reset()
             self.live_map = SceneMap()
             current_plan = self.state.snapshot().get('plan') or {}
-            first_cue = next((i['instruction'] for s in current_plan.get('shots', []) for i in s.get('human_instructions', []) if i.get('instruction')),
-                             current_plan.get('shots', [{}])[0].get('description', 'Preparing first shot…') if current_plan.get('shots') else 'Preparing first shot…')
+            first_cue = current_plan.get('shots', [{}])[0].get('description', 'Moving camera to first shot…') if current_plan.get('shots') else 'Moving camera to first shot…'
             self.state.update(results=[], active_shot=None, shot_metrics=None, sequence_video=None, teleprompter=first_cue)
             output = self.new_path('execution')
             self.state.update(output=str(output.resolve()))
@@ -396,7 +399,7 @@ class Studio:
             with self.state.lock:
                 self.state.images['before.jpg'] = self.state.images.get('camera.jpg', b'')
             try:
-                result = execute_with_replanning(self.sim, self.plan_path, self.scene_path, output, refine=True,
+                result = execute_with_replanning(self.sim, self.plan_path, self.scene_path, output, refine=False,
                                       budget=self.config['replan_budget'], brief=self.state.snapshot().get('plan_brief'), perception=self.perception,
                                       progress=self.progress, on_frame=self.frame, on_event=self.execution_event)
             except Stopped:
@@ -495,7 +498,7 @@ def make_handler(state):
                 return self.send(200, (Path(__file__).parent/'assets/studio.html').read_bytes(), 'text/html; charset=utf-8')
             if path == '/api/state':
                 return self.send(200, json.dumps(state.snapshot(), allow_nan=False).encode())
-            if path in ('/camera.jpg','/clean.jpg','/map.png','/before.jpg','/after.jpg'):
+            if path in ('/camera.jpg','/clean.jpg','/overview.jpg','/map.png','/before.jpg','/after.jpg'):
                 with state.lock:
                     content = state.images.get(path[1:])
                 return self.send(200 if content else 404, content or b'', 'image/png' if path.endswith('.png') else 'image/jpeg')

@@ -235,7 +235,9 @@ def optimize(sim, probe, shot, scene, surfaces, *, shortlist=8, progress=None):
             score += 20.0 * (min_safe_dolly - target['dolly'])
         if is_closeup_shot and 'dolly' in axes:
             dolly_gap = (limits['dolly'][1] - target['dolly']) / (limits['dolly'][1] - limits['dolly'][0])
-            score += 0.45 * dolly_gap
+            score += 1.2 * dolly_gap
+            if shot['targets'] and abs(shot['targets'][0]['center_x'] - 0.5) < 0.05 and 'truck' in target:
+                score += 0.4 * abs(target['truck'])
         travel = sum(abs(target[n]-current[n])/(limits[n][1]-limits[n][0]) for n in axes)
         ranked[key] = (score + 0.05*travel, target)
 
@@ -315,7 +317,8 @@ def optimize(sim, probe, shot, scene, surfaces, *, shortlist=8, progress=None):
         result = evaluate(shot, scene, surfaces, obs, perception.detect(obs), perception.registry)
         travel = sum(abs(target[n]-current[n])/(limits[n][1]-limits[n][0]) for n in axes)
         closeup_penalty = (
-            0.45 * (limits['dolly'][1] - target.get('dolly', 0.0)) / (limits['dolly'][1] - limits['dolly'][0])
+            1.2 * (limits['dolly'][1] - target.get('dolly', 0.0)) / (limits['dolly'][1] - limits['dolly'][0])
+            + (0.4 * abs(target.get('truck', 0.0)) if shot['targets'] and abs(shot['targets'][0]['center_x'] - 0.5) < 0.05 else 0.0)
             if is_closeup_shot and 'dolly' in axes else 0.0
         )
         objective = (not result['satisfies_observed_criteria'], result['loss'] + closeup_penalty + 0.05*travel)

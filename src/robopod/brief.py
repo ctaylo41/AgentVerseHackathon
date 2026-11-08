@@ -31,15 +31,16 @@ def requirements(brief):
     negative_dutch = bool(re.search(r'\b(?:no|avoid|without|never|not)\b[^.!]*dutch', text))
     movement_text = re.sub(r'no camera (?:movement|motion)|(?:do not|don.t) move (?:the )?camera', '', text)
     moving = bool(re.search(r'movement|motion|moition|\bpan\b|tilt|push[ -]?in|pull[ -]?back|zoom out|move (?:the )?camera|moving camera|move up|move back|pull(?:ed)? back|sweep|track|truck|pedestal|dolly|orbit|crane', movement_text))
-    return dict(human_actions_forbidden=bool(re.search(r'no (?:human|subject) (?:action|movement|motion)|(?:do not|don.t) move (?:the )?(?:presenter|subject)',text)),
-                centered_requested=exact_count==1 and bool(re.search(r'\bcenter(?:ed| the)|\bcentre(?:d| the)',text)),
+    rule_of_thirds = bool(re.search(r'(?:rule|room)[ -]of[ -]thirds', text))
+    return dict(human_actions_forbidden=bool(re.search(r'no (?:human|subject|object) (?:action|movement|motion)|(?:do not|don.?t) move (?:the )?(?:presenter|subject|objects?|anything)',text)),
+                centered_requested=bool(re.search(r'\bcenter(?:ed|ing| the)?\b|\bcentre(?:d| the)?\b|\bmiddle\b',text)) and not rule_of_thirds,
                 exact_shots=exact_count, static_requested=static and not moving,
                 dutch_requested='dutch' in text and not negative_dutch,
                 minimum_shots=2 if sequence and starts_close else 3 if sequence else 2 if close and 'then' in text else 1,
                 close_up_required=bool(close), return_to_presenter=bool(sequence),
                 starts_close=starts_close,
                 sequence_guidance='Preserve all requested subjects and shot order; return to the presenter after the close-up.' if sequence else '',
-                rule_of_thirds=bool(re.search(r'(?:rule|room)[ -]of[ -]thirds', text)),
+                rule_of_thirds=rule_of_thirds,
                 movement_requested=moving)
 
 
