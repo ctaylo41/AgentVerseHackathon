@@ -1,0 +1,22 @@
+<!-- ROOM_SOURCE: CUSTOM ROOM (Generated from room.jpg via gemini-4-argon) -->
+<mujoco>
+  <worldbody>
+    <!-- Creator Zone Marker (Walkable Clear Area) -->
+    <geom name="creator_zone" type="box" pos="1.2 0 0.002" size="0.8 1.0 0.001" rgba="0.1 0.8 0.2 0.3" contype="0" conaffinity="0"/>
+
+    <!-- Left Concrete Parapet Wall -->
+    <geom name="left_parapet_wall" type="box" pos="3.0 1.6 0.55" size="4.0 0.2 0.55" rgba="0.75 0.73 0.70 1"/>
+
+    <!-- Foreground Concrete Pillar (Right Side, behind clear zone) -->
+    <geom name="foreground_pillar" type="cylinder" pos="2.8 -0.8 2.0" size="0.45 2.0" rgba="0.7 0.68 0.65 1"/>
+
+    <!-- Midground Concrete Pillar -->
+    <geom name="midground_pillar" type="cylinder" pos="6.5 0.2 2.0" size="0.4 2.0" rgba="0.7 0.68 0.65 1"/>
+
+    <!-- Right Corridor Wall / Glass Partition -->
+    <geom name="right_corridor_wall" type="box" pos="4.0 -2.6 2.0" size="5.0 0.15 2.0" rgba="0.82 0.76 0.68 1"/>
+
+    <!-- Side Desk / Table near robot base (Clear of walking zone) -->
+    <geom name="side_desk" type="box" pos="0.0 -1.5 0.375" size="0.4 0.6 0.375" rgba="0.55 0.50 0.45 1"/>
+  </worldbody>
+</mujoco>
